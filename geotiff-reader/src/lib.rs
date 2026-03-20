@@ -1,8 +1,8 @@
-//! Pure-Rust GeoTIFF and Cloud Optimized GeoTIFF (COG) reader.
+//! Pure-Rust GeoTIFF reader with optional HTTP range-backed remote access.
 //!
 //! Supports:
 //! - **GeoTIFF**: TIFF files with GeoKey metadata (EPSG codes, CRS, tiepoints, pixel scale)
-//! - **COG**: Cloud Optimized GeoTIFF with tiled access and overview levels
+//! - **COG**: overview discovery plus optional remote open via HTTP range requests
 //!
 //! # Example
 //!
@@ -10,7 +10,7 @@
 //! use geotiff_reader::GeoTiffFile;
 //!
 //! let file = GeoTiffFile::open("dem.tif")?;
-//! println!("CRS: {:?}", file.crs());
+//! println!("EPSG: {:?}", file.epsg());
 //! println!("bounds: {:?}", file.geo_bounds());
 //! println!("size: {}x{}", file.width(), file.height());
 //! # Ok::<(), geotiff_reader::Error>(())

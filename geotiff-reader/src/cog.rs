@@ -1,4 +1,8 @@
 //! HTTP range-backed remote GeoTIFF/COG access.
+//!
+//! This module opens remote objects through the same TIFF decoder core used for
+//! local files by providing a random-access byte source backed by cached range
+//! requests.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;

@@ -1,8 +1,9 @@
-//! Pure-Rust, read-only TIFF and BigTIFF file decoder.
+//! Pure-Rust, read-only TIFF and BigTIFF decoder.
 //!
 //! Supports:
 //! - **TIFF** (classic): `II`/`MM` byte order mark + version 42
 //! - **BigTIFF**: `II`/`MM` byte order mark + version 43
+//! - **Sources**: mmap, in-memory bytes, or any custom random-access source
 //!
 //! # Example
 //!
@@ -17,6 +18,8 @@
 //! println!("  width: {}", ifd.width());
 //! println!("  height: {}", ifd.height());
 //! println!("  bits per sample: {:?}", ifd.bits_per_sample());
+//!
+//! let pixels: ndarray::ArrayD<u16> = file.read_image(0).unwrap();
 //! ```
 
 pub mod cache;

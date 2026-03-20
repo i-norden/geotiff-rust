@@ -1,3 +1,5 @@
+//! Random-access source abstraction used by the TIFF decoder.
+
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
