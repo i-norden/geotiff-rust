@@ -70,6 +70,83 @@ pub struct TiffFile {
     header: header::TiffHeader,
     ifds: Vec<ifd::Ifd>,
     block_cache: Arc<BlockCache>,
+    gdal_structural_metadata: Option<GdalStructuralMetadata>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GdalStructuralMetadata {
+    block_leader_size_as_u32: bool,
+    block_trailer_repeats_last_4_bytes: bool,
+}
+
+impl GdalStructuralMetadata {
+    fn from_prefix(bytes: &[u8]) -> Option<Self> {
+        let text = std::str::from_utf8(bytes).ok()?;
+        if !text.contains("GDAL_STRUCTURAL_METADATA_SIZE=") {
+            return None;
+        }
+
+        Some(Self {
+            block_leader_size_as_u32: text.contains("BLOCK_LEADER=SIZE_AS_UINT4"),
+            block_trailer_repeats_last_4_bytes: text
+                .contains("BLOCK_TRAILER=LAST_4_BYTES_REPEATED"),
+        })
+    }
+
+    pub(crate) fn unwrap_block<'a>(
+        &self,
+        raw: &'a [u8],
+        byte_order: ByteOrder,
+        offset: u64,
+    ) -> Result<&'a [u8]> {
+        let mut payload_start = 0usize;
+        let mut payload_end = raw.len();
+
+        if self.block_leader_size_as_u32 {
+            if raw.len() < 4 {
+                return Err(Error::InvalidImageLayout(format!(
+                    "GDAL block leader at offset {offset} is truncated"
+                )));
+            }
+            let declared_len = match byte_order {
+                ByteOrder::LittleEndian => u32::from_le_bytes(raw[..4].try_into().unwrap()),
+                ByteOrder::BigEndian => u32::from_be_bytes(raw[..4].try_into().unwrap()),
+            } as usize;
+            payload_start = 4;
+            payload_end = payload_start.checked_add(declared_len).ok_or_else(|| {
+                Error::InvalidImageLayout("GDAL block payload overflows usize".into())
+            })?;
+        }
+
+        if self.block_trailer_repeats_last_4_bytes {
+            if payload_end.checked_add(4).is_none() || raw.len() < payload_end + 4 {
+                return Err(Error::InvalidImageLayout(format!(
+                    "GDAL block trailer at offset {offset} is truncated"
+                )));
+            }
+            if payload_end >= 4 {
+                let expected = &raw[payload_end - 4..payload_end];
+                let trailer = &raw[payload_end..payload_end + 4];
+                if expected != trailer {
+                    return Err(Error::InvalidImageLayout(format!(
+                        "GDAL block trailer mismatch at offset {offset}"
+                    )));
+                }
+            }
+        } else if payload_end > raw.len() {
+            return Err(Error::InvalidImageLayout(format!(
+                "GDAL block leader length exceeds available bytes at offset {offset}"
+            )));
+        }
+
+        if payload_end > raw.len() || payload_start > payload_end {
+            return Err(Error::InvalidImageLayout(format!(
+                "GDAL structural metadata produced an invalid payload range at offset {offset}"
+            )));
+        }
+
+        Ok(&raw[payload_start..payload_end])
+    }
 }
 
 /// Types that can be read directly from a decoded TIFF raster.
@@ -157,6 +234,7 @@ impl TiffFile {
         let header_len = usize::try_from(source.len().min(16)).unwrap_or(16);
         let header_bytes = source.read_exact_at(0, header_len)?;
         let header = header::TiffHeader::parse(&header_bytes)?;
+        let gdal_structural_metadata = parse_gdal_structural_metadata(source.as_ref());
         let ifds = ifd::parse_ifd_chain(source.as_ref(), &header)?;
         Ok(Self {
             source,
@@ -166,6 +244,7 @@ impl TiffFile {
                 options.block_cache_bytes,
                 options.block_cache_slots,
             )),
+            gdal_structural_metadata,
         })
     }
 
@@ -213,6 +292,7 @@ impl TiffFile {
                 ifd,
                 self.byte_order(),
                 &self.block_cache,
+                self.gdal_structural_metadata.as_ref(),
             )
         } else {
             strip::read_image(
@@ -220,6 +300,7 @@ impl TiffFile {
                 ifd,
                 self.byte_order(),
                 &self.block_cache,
+                self.gdal_structural_metadata.as_ref(),
             )
         }
     }
@@ -254,11 +335,21 @@ impl TiffFile {
     }
 }
 
+fn parse_gdal_structural_metadata(source: &dyn TiffSource) -> Option<GdalStructuralMetadata> {
+    let prefix_len = usize::try_from(source.len().min(16 * 1024)).ok()?;
+    if prefix_len <= 8 {
+        return None;
+    }
+
+    let bytes = source.read_exact_at(8, prefix_len - 8).ok()?;
+    GdalStructuralMetadata::from_prefix(&bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::TiffFile;
+    use super::{GdalStructuralMetadata, TiffFile};
 
     fn le_u16(value: u16) -> [u8; 2] {
         value.to_le_bytes()
@@ -354,5 +445,43 @@ mod tests {
         let (values, offset) = image.into_raw_vec_and_offset();
         assert_eq!(offset, Some(0));
         assert_eq!(values, vec![1, 2, 4]);
+    }
+
+    #[test]
+    fn unwraps_gdal_structural_metadata_block() {
+        let metadata = GdalStructuralMetadata::from_prefix(
+            b"GDAL_STRUCTURAL_METADATA_SIZE=000174 bytes\nBLOCK_LEADER=SIZE_AS_UINT4\nBLOCK_TRAILER=LAST_4_BYTES_REPEATED\n",
+        )
+        .unwrap();
+
+        let payload = [1u8, 2, 3, 4];
+        let mut block = Vec::new();
+        block.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        block.extend_from_slice(&payload);
+        block.extend_from_slice(&payload[payload.len() - 4..]);
+
+        let unwrapped = metadata
+            .unwrap_block(&block, crate::ByteOrder::LittleEndian, 256)
+            .unwrap();
+        assert_eq!(unwrapped, payload);
+    }
+
+    #[test]
+    fn rejects_gdal_structural_metadata_trailer_mismatch() {
+        let metadata = GdalStructuralMetadata::from_prefix(
+            b"GDAL_STRUCTURAL_METADATA_SIZE=000174 bytes\nBLOCK_LEADER=SIZE_AS_UINT4\nBLOCK_TRAILER=LAST_4_BYTES_REPEATED\n",
+        )
+        .unwrap();
+
+        let block = [
+            4u8, 0, 0, 0, //
+            1, 2, 3, 4, //
+            4, 3, 2, 1,
+        ];
+
+        let error = metadata
+            .unwrap_block(&block, crate::ByteOrder::LittleEndian, 512)
+            .unwrap_err();
+        assert!(error.to_string().contains("GDAL block trailer mismatch"));
     }
 }

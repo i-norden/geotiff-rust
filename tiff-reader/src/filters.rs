@@ -156,7 +156,7 @@ fn decompress_zstd(data: &[u8], index: usize) -> Result<Vec<u8>> {
 
 #[cfg(feature = "jpeg")]
 fn merge_jpeg_stream(jpeg_tables: Option<&[u8]>, scan_data: &[u8]) -> Vec<u8> {
-    if scan_data.starts_with(&[0xff, 0xd8]) || jpeg_tables.is_none() {
+    if jpeg_tables.is_none() {
         return scan_data.to_vec();
     }
 

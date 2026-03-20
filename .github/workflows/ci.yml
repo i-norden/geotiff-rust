@@ -34,3 +34,23 @@ jobs:
 
       - name: Run all-feature tests
         run: cargo test --workspace --all-features
+
+      - name: Verify checked-in interoperability corpus
+        run: ./scripts/fetch-interoperability-corpus.sh --verify-only
+
+      - name: Verify fuzz seeds
+        run: |
+          ./scripts/seed-fuzz-corpus.sh
+          git diff --exit-code -- fuzz/corpus
+
+      - name: Run minimal TIFF tests
+        run: cargo test -p tiff-reader --no-default-features
+
+      - name: Run minimal GeoTIFF tests
+        run: cargo test -p geotiff-reader --no-default-features
+
+      - name: Run COG-only GeoTIFF tests
+        run: cargo test -p geotiff-reader --no-default-features --features cog
+
+      - name: Check fuzz targets
+        run: cargo check --manifest-path fuzz/Cargo.toml
