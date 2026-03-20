@@ -1,0 +1,11 @@
+target/
+
+# Local editor settings
+.idea/
+.vscode/
+
+# Local Python environments used for fixture generation
+.venv/
+
+# macOS Finder metadata
+.DS_Store
