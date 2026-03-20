@@ -59,10 +59,7 @@ pub enum Error {
     },
 
     #[error("invalid TIFF tag {tag}: {reason}")]
-    InvalidTagValue {
-        tag: u16,
-        reason: String,
-    },
+    InvalidTagValue { tag: u16, reason: String },
 
     #[error("invalid image layout: {0}")]
     InvalidImageLayout(String),

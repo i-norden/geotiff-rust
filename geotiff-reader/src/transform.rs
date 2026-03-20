@@ -21,10 +21,7 @@ pub struct GeoTransform {
 
 impl GeoTransform {
     /// Build from ModelTiepoint (tag 33922) and ModelPixelScale (tag 33550).
-    pub fn from_tiepoint_and_scale(
-        tiepoint: &[f64; 6],
-        pixel_scale: &[f64; 3],
-    ) -> Self {
+    pub fn from_tiepoint_and_scale(tiepoint: &[f64; 6], pixel_scale: &[f64; 3]) -> Self {
         // tiepoint: [I, J, K, X, Y, Z]
         // pixel_scale: [ScaleX, ScaleY, ScaleZ]
         Self {
@@ -81,9 +78,15 @@ impl GeoTransform {
             self.pixel_to_geo(width as f64, height as f64),
         ];
         let min_x = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
-        let max_x = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
+        let max_x = corners
+            .iter()
+            .map(|c| c.0)
+            .fold(f64::NEG_INFINITY, f64::max);
         let min_y = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
-        let max_y = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+        let max_y = corners
+            .iter()
+            .map(|c| c.1)
+            .fold(f64::NEG_INFINITY, f64::max);
         [min_x, min_y, max_x, max_y]
     }
 }

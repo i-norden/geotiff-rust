@@ -23,20 +23,12 @@ impl CrsInfo {
     /// Extract CRS information from a GeoKey directory.
     pub fn from_geokeys(geokeys: &GeoKeyDirectory) -> Self {
         Self {
-            model_type: geokeys
-                .get_short(geokeys::GT_MODEL_TYPE)
-                .unwrap_or(0),
-            raster_type: geokeys
-                .get_short(geokeys::GT_RASTER_TYPE)
-                .unwrap_or(1),
+            model_type: geokeys.get_short(geokeys::GT_MODEL_TYPE).unwrap_or(0),
+            raster_type: geokeys.get_short(geokeys::GT_RASTER_TYPE).unwrap_or(1),
             projected_epsg: geokeys.get_short(geokeys::PROJECTED_CS_TYPE),
             geographic_epsg: geokeys.get_short(geokeys::GEOGRAPHIC_TYPE),
-            projection_citation: geokeys
-                .get_ascii(geokeys::PROJ_CITATION)
-                .map(String::from),
-            geographic_citation: geokeys
-                .get_ascii(geokeys::GEOG_CITATION)
-                .map(String::from),
+            projection_citation: geokeys.get_ascii(geokeys::PROJ_CITATION).map(String::from),
+            geographic_citation: geokeys.get_ascii(geokeys::GEOG_CITATION).map(String::from),
         }
     }
 

@@ -56,11 +56,7 @@ impl GeoKeyDirectory {
     /// - `directory`: contents of tag 34735 (SHORT array)
     /// - `double_params`: contents of tag 34736 (DOUBLE array), may be empty
     /// - `ascii_params`: contents of tag 34737 (ASCII), may be empty
-    pub fn parse(
-        directory: &[u16],
-        double_params: &[f64],
-        ascii_params: &str,
-    ) -> Option<Self> {
+    pub fn parse(directory: &[u16], double_params: &[f64], ascii_params: &str) -> Option<Self> {
         if directory.len() < 4 {
             return None;
         }

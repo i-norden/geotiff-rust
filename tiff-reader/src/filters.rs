@@ -78,10 +78,12 @@ fn decompress_lzw(data: &[u8], index: usize) -> Result<Vec<u8>> {
     use weezl::BitOrder;
 
     let mut decoder = Decoder::new(BitOrder::Msb, 8);
-    decoder.decode(data).map_err(|e| Error::DecompressionFailed {
-        index,
-        reason: format!("LZW: {e}"),
-    })
+    decoder
+        .decode(data)
+        .map_err(|e| Error::DecompressionFailed {
+            index,
+            reason: format!("LZW: {e}"),
+        })
 }
 
 fn decompress_packbits(data: &[u8], index: usize) -> Result<Vec<u8>> {
@@ -125,12 +127,10 @@ fn decompress_jpeg(data: &[u8], index: usize) -> Result<Vec<u8>> {
     use jpeg_decoder::Decoder;
 
     let mut decoder = Decoder::new(data);
-    decoder
-        .decode()
-        .map_err(|e| Error::DecompressionFailed {
-            index,
-            reason: format!("JPEG: {e}"),
-        })
+    decoder.decode().map_err(|e| Error::DecompressionFailed {
+        index,
+        reason: format!("JPEG: {e}"),
+    })
 }
 
 #[cfg(feature = "zstd")]
@@ -181,22 +181,37 @@ fn reverse_horizontal_predictor(buf: &mut [u8], bit_depth: u16, samples: u16) {
         2 => {
             for index in (lookback..buf.len()).step_by(2) {
                 let current = u16::from_ne_bytes(buf[index..index + 2].try_into().unwrap());
-                let previous = u16::from_ne_bytes(buf[index - lookback..index - lookback + 2].try_into().unwrap());
-                buf[index..index + 2].copy_from_slice(&current.wrapping_add(previous).to_ne_bytes());
+                let previous = u16::from_ne_bytes(
+                    buf[index - lookback..index - lookback + 2]
+                        .try_into()
+                        .unwrap(),
+                );
+                buf[index..index + 2]
+                    .copy_from_slice(&current.wrapping_add(previous).to_ne_bytes());
             }
         }
         4 => {
             for index in (lookback..buf.len()).step_by(4) {
                 let current = u32::from_ne_bytes(buf[index..index + 4].try_into().unwrap());
-                let previous = u32::from_ne_bytes(buf[index - lookback..index - lookback + 4].try_into().unwrap());
-                buf[index..index + 4].copy_from_slice(&current.wrapping_add(previous).to_ne_bytes());
+                let previous = u32::from_ne_bytes(
+                    buf[index - lookback..index - lookback + 4]
+                        .try_into()
+                        .unwrap(),
+                );
+                buf[index..index + 4]
+                    .copy_from_slice(&current.wrapping_add(previous).to_ne_bytes());
             }
         }
         _ => {
             for index in (lookback..buf.len()).step_by(8) {
                 let current = u64::from_ne_bytes(buf[index..index + 8].try_into().unwrap());
-                let previous = u64::from_ne_bytes(buf[index - lookback..index - lookback + 8].try_into().unwrap());
-                buf[index..index + 8].copy_from_slice(&current.wrapping_add(previous).to_ne_bytes());
+                let previous = u64::from_ne_bytes(
+                    buf[index - lookback..index - lookback + 8]
+                        .try_into()
+                        .unwrap(),
+                );
+                buf[index..index + 8]
+                    .copy_from_slice(&current.wrapping_add(previous).to_ne_bytes());
             }
         }
     }

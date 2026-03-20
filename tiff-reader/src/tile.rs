@@ -12,7 +12,12 @@ use crate::header::ByteOrder;
 use crate::ifd::{Ifd, RasterLayout};
 use crate::source::TiffSource;
 
-pub fn read_image(source: &dyn TiffSource, ifd: &Ifd, byte_order: ByteOrder, cache: &BlockCache) -> Result<Vec<u8>> {
+pub fn read_image(
+    source: &dyn TiffSource,
+    ifd: &Ifd,
+    byte_order: ByteOrder,
+    cache: &BlockCache,
+) -> Result<Vec<u8>> {
     let layout = ifd.raster_layout()?;
     let tile_width = ifd
         .tile_width()
@@ -26,7 +31,9 @@ pub fn read_image(source: &dyn TiffSource, ifd: &Ifd, byte_order: ByteOrder, cac
         ));
     }
 
-    let offsets = ifd.tile_offsets().ok_or(Error::TagNotFound(crate::ifd::TAG_TILE_OFFSETS))?;
+    let offsets = ifd
+        .tile_offsets()
+        .ok_or(Error::TagNotFound(crate::ifd::TAG_TILE_OFFSETS))?;
     let counts = ifd
         .tile_byte_counts()
         .ok_or(Error::TagNotFound(crate::ifd::TAG_TILE_BYTE_COUNTS))?;
@@ -90,13 +97,19 @@ pub fn read_image(source: &dyn TiffSource, ifd: &Ifd, byte_order: ByteOrder, cac
     #[cfg(feature = "rayon")]
     let decoded_blocks: Result<Vec<_>> = specs
         .par_iter()
-        .map(|&spec| read_tile_block(source, ifd, byte_order, cache, spec, &layout).map(|block| (spec, block)))
+        .map(|&spec| {
+            read_tile_block(source, ifd, byte_order, cache, spec, &layout)
+                .map(|block| (spec, block))
+        })
         .collect();
 
     #[cfg(not(feature = "rayon"))]
     let decoded_blocks: Result<Vec<_>> = specs
         .iter()
-        .map(|&spec| read_tile_block(source, ifd, byte_order, cache, spec, &layout).map(|block| (spec, block)))
+        .map(|&spec| {
+            read_tile_block(source, ifd, byte_order, cache, spec, &layout)
+                .map(|block| (spec, block))
+        })
         .collect();
 
     for (spec, block) in decoded_blocks? {
@@ -113,7 +126,8 @@ pub fn read_image(source: &dyn TiffSource, ifd: &Ifd, byte_order: ByteOrder, cac
             let copy_bytes_per_row = spec.cols_in_tile * layout.pixel_stride_bytes();
             for row in 0..spec.rows_in_tile {
                 let src_offset = row * src_row_bytes;
-                let dest_offset = (spec.y + row) * layout.row_bytes() + spec.x * layout.pixel_stride_bytes();
+                let dest_offset =
+                    (spec.y + row) * layout.row_bytes() + spec.x * layout.pixel_stride_bytes();
                 output[dest_offset..dest_offset + copy_bytes_per_row]
                     .copy_from_slice(&block[src_offset..src_offset + copy_bytes_per_row]);
             }
@@ -123,9 +137,10 @@ pub fn read_image(source: &dyn TiffSource, ifd: &Ifd, byte_order: ByteOrder, cac
                 let dest_row_offset = (spec.y + row) * layout.row_bytes();
                 let dest_row = &mut output[dest_row_offset..dest_row_offset + layout.row_bytes()];
                 for col in 0..spec.cols_in_tile {
-                    let src = &src_row[col * layout.bytes_per_sample..(col + 1) * layout.bytes_per_sample];
-                    let pixel_base =
-                        (spec.x + col) * layout.pixel_stride_bytes() + spec.plane * layout.bytes_per_sample;
+                    let src = &src_row
+                        [col * layout.bytes_per_sample..(col + 1) * layout.bytes_per_sample];
+                    let pixel_base = (spec.x + col) * layout.pixel_stride_bytes()
+                        + spec.plane * layout.bytes_per_sample;
                     dest_row[pixel_base..pixel_base + layout.bytes_per_sample].copy_from_slice(src);
                 }
             }

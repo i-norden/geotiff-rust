@@ -6,21 +6,21 @@ use crate::source::TiffSource;
 /// TIFF data type codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TagType {
-    Byte,       // 1
-    Ascii,      // 2
-    Short,      // 3
-    Long,       // 4
-    Rational,   // 5
-    SByte,      // 6
-    Undefined,  // 7
-    SShort,     // 8
-    SLong,      // 9
-    SRational,  // 10
-    Float,      // 11
-    Double,     // 12
-    Long8,      // 16 (BigTIFF)
-    SLong8,     // 17 (BigTIFF)
-    Ifd8,       // 18 (BigTIFF)
+    Byte,      // 1
+    Ascii,     // 2
+    Short,     // 3
+    Long,      // 4
+    Rational,  // 5
+    SByte,     // 6
+    Undefined, // 7
+    SShort,    // 8
+    SLong,     // 9
+    SRational, // 10
+    Float,     // 11
+    Double,    // 12
+    Long8,     // 16 (BigTIFF)
+    SLong8,    // 17 (BigTIFF)
+    Ifd8,      // 18 (BigTIFF)
     Unknown(u16),
 }
 
@@ -52,7 +52,12 @@ impl TagType {
             Self::Byte | Self::Ascii | Self::SByte | Self::Undefined => 1,
             Self::Short | Self::SShort => 2,
             Self::Long | Self::SLong | Self::Float => 4,
-            Self::Rational | Self::SRational | Self::Double | Self::Long8 | Self::SLong8 | Self::Ifd8 => 8,
+            Self::Rational
+            | Self::SRational
+            | Self::Double
+            | Self::Long8
+            | Self::SLong8
+            | Self::Ifd8 => 8,
             Self::Unknown(_) => 1,
         }
     }
@@ -183,7 +188,9 @@ impl Tag {
             &value_offset_bytes[..total_size]
         } else {
             let offset = match byte_order {
-                ByteOrder::LittleEndian => u32::from_le_bytes(value_offset_bytes.try_into().unwrap()),
+                ByteOrder::LittleEndian => {
+                    u32::from_le_bytes(value_offset_bytes.try_into().unwrap())
+                }
                 ByteOrder::BigEndian => u32::from_be_bytes(value_offset_bytes.try_into().unwrap()),
             } as u64;
             owned = read_value_bytes(source, offset, total_size)?;
@@ -216,7 +223,9 @@ impl Tag {
             &value_offset_bytes[..total_size]
         } else {
             let offset = match byte_order {
-                ByteOrder::LittleEndian => u64::from_le_bytes(value_offset_bytes.try_into().unwrap()),
+                ByteOrder::LittleEndian => {
+                    u64::from_le_bytes(value_offset_bytes.try_into().unwrap())
+                }
                 ByteOrder::BigEndian => u64::from_be_bytes(value_offset_bytes.try_into().unwrap()),
             };
             owned = read_value_bytes(source, offset, total_size)?;
@@ -245,10 +254,12 @@ fn value_len(tag: u16, count: u64, element_size: usize) -> Result<usize> {
         tag,
         reason: "value count does not fit in memory".into(),
     })?;
-    count.checked_mul(element_size).ok_or_else(|| Error::InvalidTagValue {
-        tag,
-        reason: "value byte length overflows usize".into(),
-    })
+    count
+        .checked_mul(element_size)
+        .ok_or_else(|| Error::InvalidTagValue {
+            tag,
+            reason: "value byte length overflows usize".into(),
+        })
 }
 
 fn slice_at(data: &[u8], offset: u64, len: usize) -> Result<&[u8]> {
@@ -282,9 +293,7 @@ fn decode_value(
     let n = count as usize;
 
     Ok(match tag_type {
-        TagType::Byte | TagType::Unknown(_) => {
-            TagValue::Byte(cursor.read_bytes(n)?.to_vec())
-        }
+        TagType::Byte | TagType::Unknown(_) => TagValue::Byte(cursor.read_bytes(n)?.to_vec()),
         TagType::Ascii => {
             let raw = cursor.read_bytes(n)?;
             let s = String::from_utf8_lossy(raw)
@@ -319,9 +328,7 @@ fn decode_value(
             let raw = cursor.read_bytes(n)?;
             TagValue::SByte(raw.iter().map(|&b| b as i8).collect())
         }
-        TagType::Undefined => {
-            TagValue::Undefined(cursor.read_bytes(n)?.to_vec())
-        }
+        TagType::Undefined => TagValue::Undefined(cursor.read_bytes(n)?.to_vec()),
         TagType::SShort => {
             let mut v = Vec::with_capacity(n);
             for _ in 0..n {

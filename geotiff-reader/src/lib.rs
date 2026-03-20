@@ -97,8 +97,11 @@ impl GeoTiffFile {
         let crs = CrsInfo::from_geokeys(&geokeys);
         let epsg = crs.epsg();
         let tiepoints = parse_tiepoints(ifd);
-        let pixel_scale = parse_fixed_len_double_tag::<3>(ifd.tag(TAG_MODEL_PIXEL_SCALE).map(|tag| &tag.value));
-        let transformation = parse_fixed_len_double_tag::<16>(ifd.tag(TAG_MODEL_TRANSFORMATION).map(|tag| &tag.value));
+        let pixel_scale =
+            parse_fixed_len_double_tag::<3>(ifd.tag(TAG_MODEL_PIXEL_SCALE).map(|tag| &tag.value));
+        let transformation = parse_fixed_len_double_tag::<16>(
+            ifd.tag(TAG_MODEL_TRANSFORMATION).map(|tag| &tag.value),
+        );
         let transform = transformation
             .as_ref()
             .map(GeoTransform::from_transformation_matrix)
@@ -107,14 +110,17 @@ impl GeoTiffFile {
                 let scale = pixel_scale.as_ref()?;
                 Some(GeoTransform::from_tiepoint_and_scale(tiepoint, scale))
             });
-        let geo_bounds = transform.as_ref().map(|gt| gt.bounds(ifd.width(), ifd.height()));
+        let geo_bounds = transform
+            .as_ref()
+            .map(|gt| gt.bounds(ifd.width(), ifd.height()));
         let overview_ifds = tiff
             .ifds()
             .iter()
             .enumerate()
             .skip(1)
             .filter_map(|(index, candidate)| {
-                (candidate.width() <= ifd.width() && candidate.height() <= ifd.height()).then_some(index)
+                (candidate.width() <= ifd.width() && candidate.height() <= ifd.height())
+                    .then_some(index)
             })
             .collect();
 
@@ -177,12 +183,14 @@ impl GeoTiffFile {
 
     /// Convert a pixel coordinate to map coordinates.
     pub fn pixel_to_geo(&self, col: f64, row: f64) -> Option<(f64, f64)> {
-        self.transform.map(|transform| transform.pixel_to_geo(col, row))
+        self.transform
+            .map(|transform| transform.pixel_to_geo(col, row))
     }
 
     /// Convert map coordinates to pixel coordinates.
     pub fn geo_to_pixel(&self, x: f64, y: f64) -> Option<(f64, f64)> {
-        self.transform.and_then(|transform| transform.geo_to_pixel(x, y))
+        self.transform
+            .and_then(|transform| transform.geo_to_pixel(x, y))
     }
 
     /// Returns the image width in pixels.
@@ -247,7 +255,8 @@ fn parse_geokey_directory(ifd: &tiff_reader::Ifd) -> Result<GeoKeyDirectory> {
         .tag(TAG_GEO_ASCII_PARAMS)
         .and_then(|tag| tag.value.as_str())
         .unwrap_or("");
-    GeoKeyDirectory::parse(directory, &double_params, ascii_params).ok_or(Error::InvalidGeoKeyDirectory)
+    GeoKeyDirectory::parse(directory, &double_params, ascii_params)
+        .ok_or(Error::InvalidGeoKeyDirectory)
 }
 
 #[cfg(feature = "local")]
@@ -317,9 +326,24 @@ mod tests {
             (277u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
             (278u16, 4u16, 1u32, le_u32(2).to_vec()),
             (279u16, 4u16, 1u32, le_u32(image_data.len() as u32).to_vec()),
-            (33550u16, 12u16, 3u32, scales.iter().flat_map(|value| le_f64(*value)).collect()),
-            (33922u16, 12u16, 6u32, tiepoints.iter().flat_map(|value| le_f64(*value)).collect()),
-            (34735u16, 3u16, geo_keys.len() as u32, geo_keys.iter().flat_map(|value| le_u16(*value)).collect()),
+            (
+                33550u16,
+                12u16,
+                3u32,
+                scales.iter().flat_map(|value| le_f64(*value)).collect(),
+            ),
+            (
+                33922u16,
+                12u16,
+                6u32,
+                tiepoints.iter().flat_map(|value| le_f64(*value)).collect(),
+            ),
+            (
+                34735u16,
+                3u16,
+                geo_keys.len() as u32,
+                geo_keys.iter().flat_map(|value| le_u16(*value)).collect(),
+            ),
             (42113u16, 2u16, nodata.len() as u32, nodata),
         ];
 
