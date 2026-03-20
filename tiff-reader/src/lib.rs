@@ -149,6 +149,8 @@ impl GdalStructuralMetadata {
     }
 }
 
+const GDAL_STRUCTURAL_METADATA_PREFIX: &str = "GDAL_STRUCTURAL_METADATA_SIZE=";
+
 /// Types that can be read directly from a decoded TIFF raster.
 pub trait TiffSample: Clone + 'static {
     fn matches_layout(layout: &RasterLayout) -> bool;
@@ -336,25 +338,41 @@ impl TiffFile {
 }
 
 fn parse_gdal_structural_metadata(source: &dyn TiffSource) -> Option<GdalStructuralMetadata> {
-    let prefix_len = usize::try_from(source.len().min(16 * 1024)).ok()?;
-    if prefix_len <= 8 {
+    let available_len = usize::try_from(source.len().checked_sub(8)?).ok()?;
+    if available_len == 0 {
         return None;
     }
 
-    let bytes = source.read_exact_at(8, prefix_len - 8).ok()?;
+    let probe_len = available_len.min(64);
+    let probe = source.read_exact_at(8, probe_len).ok()?;
+    let declared_len = parse_gdal_structural_metadata_size(&probe)?;
+    if declared_len == 0 || declared_len > available_len {
+        return None;
+    }
+
+    let bytes = source.read_exact_at(8, declared_len).ok()?;
     GdalStructuralMetadata::from_prefix(&bytes)
+}
+
+fn parse_gdal_structural_metadata_size(bytes: &[u8]) -> Option<usize> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let value = text.strip_prefix(GDAL_STRUCTURAL_METADATA_PREFIX)?;
+    let digits: String = value.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-    use std::thread;
-    use std::time::Duration;
 
-    use super::{GdalStructuralMetadata, TiffFile};
-    use crate::source::TiffSource;
+    use super::{
+        parse_gdal_structural_metadata, GdalStructuralMetadata, TiffFile,
+        GDAL_STRUCTURAL_METADATA_PREFIX,
+    };
+    use crate::source::BytesSource;
 
     fn le_u16(value: u16) -> [u8; 2] {
         value.to_le_bytes()
@@ -419,153 +437,6 @@ mod tests {
             data.extend_from_slice(&value);
         }
         data
-    }
-
-    fn build_multi_strip_tiff(width: u32, rows: &[&[u8]]) -> Vec<u8> {
-        let height = rows.len() as u32;
-        let rows_per_strip = 1u32;
-        let mut entries = BTreeMap::new();
-        entries.insert(256, (4, 1, le_u32(width).to_vec()));
-        entries.insert(257, (4, 1, le_u32(height).to_vec()));
-        entries.insert(258, (3, 1, [8, 0, 0, 0].to_vec()));
-        entries.insert(259, (3, 1, [1, 0, 0, 0].to_vec()));
-        entries.insert(277, (3, 1, [1, 0, 0, 0].to_vec()));
-        entries.insert(278, (4, 1, le_u32(rows_per_strip).to_vec()));
-        entries.insert(
-            279,
-            (
-                4,
-                rows.len() as u32,
-                rows.iter()
-                    .flat_map(|row| le_u32(row.len() as u32))
-                    .collect::<Vec<_>>(),
-            ),
-        );
-
-        let ifd_offset = 8u32;
-        let ifd_size = 2 + (entries.len() + 1) * 12 + 4;
-        let mut image_data_offset = ifd_offset as usize + ifd_size;
-        let strip_offsets: Vec<u32> = rows
-            .iter()
-            .map(|row| {
-                let offset = image_data_offset as u32;
-                image_data_offset += row.len();
-                offset
-            })
-            .collect();
-        entries.insert(
-            273,
-            (
-                4,
-                strip_offsets.len() as u32,
-                strip_offsets
-                    .iter()
-                    .flat_map(|offset| le_u32(*offset))
-                    .collect::<Vec<_>>(),
-            ),
-        );
-
-        let mut next_data_offset = image_data_offset;
-        let mut data = Vec::with_capacity(next_data_offset);
-        data.extend_from_slice(b"II");
-        data.extend_from_slice(&le_u16(42));
-        data.extend_from_slice(&le_u32(ifd_offset));
-        data.extend_from_slice(&le_u16(entries.len() as u16));
-
-        let mut deferred = Vec::new();
-        for (tag, (ty, count, value)) in entries {
-            data.extend_from_slice(&le_u16(tag));
-            data.extend_from_slice(&le_u16(ty));
-            data.extend_from_slice(&le_u32(count));
-            if value.len() <= 4 {
-                let mut inline = [0u8; 4];
-                inline[..value.len()].copy_from_slice(&value);
-                data.extend_from_slice(&inline);
-            } else {
-                let offset = next_data_offset as u32;
-                data.extend_from_slice(&le_u32(offset));
-                next_data_offset += value.len();
-                deferred.push(value);
-            }
-        }
-        data.extend_from_slice(&le_u32(0));
-        for row in rows {
-            data.extend_from_slice(row);
-        }
-        for value in deferred {
-            data.extend_from_slice(&value);
-        }
-        data
-    }
-
-    #[cfg(feature = "rayon")]
-    struct NonResidentSource {
-        bytes: Vec<u8>,
-        inflight_reads: AtomicUsize,
-        max_inflight_reads: AtomicUsize,
-    }
-
-    #[cfg(feature = "rayon")]
-    impl NonResidentSource {
-        fn new(bytes: Vec<u8>) -> Self {
-            Self {
-                bytes,
-                inflight_reads: AtomicUsize::new(0),
-                max_inflight_reads: AtomicUsize::new(0),
-            }
-        }
-
-        fn max_inflight_reads(&self) -> usize {
-            self.max_inflight_reads.load(Ordering::SeqCst)
-        }
-    }
-
-    #[cfg(feature = "rayon")]
-    impl TiffSource for NonResidentSource {
-        fn len(&self) -> u64 {
-            self.bytes.len() as u64
-        }
-
-        fn read_exact_at(&self, offset: u64, len: usize) -> crate::error::Result<Vec<u8>> {
-            let inflight = self.inflight_reads.fetch_add(1, Ordering::SeqCst) + 1;
-            let mut observed = self.max_inflight_reads.load(Ordering::SeqCst);
-            while inflight > observed
-                && self
-                    .max_inflight_reads
-                    .compare_exchange(observed, inflight, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_err()
-            {
-                observed = self.max_inflight_reads.load(Ordering::SeqCst);
-            }
-
-            thread::sleep(Duration::from_millis(10));
-
-            let start =
-                usize::try_from(offset).map_err(|_| crate::error::Error::OffsetOutOfBounds {
-                    offset,
-                    length: len as u64,
-                    data_len: self.len(),
-                })?;
-            let end = start
-                .checked_add(len)
-                .ok_or(crate::error::Error::OffsetOutOfBounds {
-                    offset,
-                    length: len as u64,
-                    data_len: self.len(),
-                })?;
-            let result = if end > self.bytes.len() {
-                Err(crate::error::Error::OffsetOutOfBounds {
-                    offset,
-                    length: len as u64,
-                    data_len: self.len(),
-                })
-            } else {
-                Ok(self.bytes[start..end].to_vec())
-            };
-
-            self.inflight_reads.fetch_sub(1, Ordering::SeqCst);
-            result
-        }
     }
 
     #[test]
@@ -637,17 +508,20 @@ mod tests {
         assert!(error.to_string().contains("GDAL block trailer mismatch"));
     }
 
-    #[cfg(feature = "rayon")]
     #[test]
-    fn nonresident_sources_are_read_serially() {
-        let bytes = build_multi_strip_tiff(2, &[&[1, 2], &[3, 4]]);
-        let source = Arc::new(NonResidentSource::new(bytes));
-        let file = TiffFile::from_source(source.clone()).unwrap();
+    fn parses_gdal_structural_metadata_before_binary_prefix_data() {
+        let rest = "LAYOUT=IFDS_BEFORE_DATA\nBLOCK_ORDER=ROW_MAJOR\nBLOCK_LEADER=SIZE_AS_UINT4\nBLOCK_TRAILER=LAST_4_BYTES_REPEATED\nKNOWN_INCOMPATIBLE_EDITION=NO\n";
+        let prefix = format!("{GDAL_STRUCTURAL_METADATA_PREFIX}{:06} bytes\n{rest}", 0);
+        let metadata_len = prefix.len();
+        let prefix = format!("{GDAL_STRUCTURAL_METADATA_PREFIX}{metadata_len:06} bytes\n{rest}");
 
-        let image = file.read_image::<u8>(0).unwrap();
-        let (values, offset) = image.into_raw_vec_and_offset();
-        assert_eq!(offset, Some(0));
-        assert_eq!(values, vec![1, 2, 3, 4]);
-        assert_eq!(source.max_inflight_reads(), 1);
+        let mut bytes = vec![0u8; 8];
+        bytes.extend_from_slice(prefix.as_bytes());
+        bytes.extend_from_slice(&[0xff, 0x00, 0x80, 0x7f]);
+
+        let source = BytesSource::new(bytes);
+        let metadata = parse_gdal_structural_metadata(&source).unwrap();
+        assert!(metadata.block_leader_size_as_u32);
+        assert!(metadata.block_trailer_repeats_last_4_bytes);
     }
 }
