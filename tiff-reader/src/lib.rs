@@ -1,8 +1,9 @@
-//! Pure-Rust, read-only TIFF and BigTIFF file decoder.
+//! Pure-Rust, read-only TIFF and BigTIFF decoder.
 //!
 //! Supports:
 //! - **TIFF** (classic): `II`/`MM` byte order mark + version 42
 //! - **BigTIFF**: `II`/`MM` byte order mark + version 43
+//! - **Sources**: mmap, in-memory bytes, or any custom random-access source
 //!
 //! # Example
 //!
@@ -17,6 +18,8 @@
 //! println!("  width: {}", ifd.width());
 //! println!("  height: {}", ifd.height());
 //! println!("  bits per sample: {:?}", ifd.bits_per_sample());
+//!
+//! let pixels: ndarray::ArrayD<u16> = file.read_image(0).unwrap();
 //! ```
 
 pub mod cache;
@@ -25,8 +28,8 @@ pub mod filters;
 pub mod header;
 pub mod ifd;
 pub mod io;
-pub mod strip;
 pub mod source;
+pub mod strip;
 pub mod tag;
 pub mod tile;
 
@@ -84,10 +87,7 @@ macro_rules! impl_tiff_sample {
             }
 
             fn decode_many(bytes: &[u8]) -> Vec<Self> {
-                bytes
-                    .chunks_exact($chunk)
-                    .map($from_ne)
-                    .collect()
+                bytes.chunks_exact($chunk).map($from_ne).collect()
             }
 
             fn type_name() -> &'static str {
@@ -99,14 +99,30 @@ macro_rules! impl_tiff_sample {
 
 impl_tiff_sample!(u8, 1, 8, 1, |chunk: &[u8]| chunk[0]);
 impl_tiff_sample!(i8, 2, 8, 1, |chunk: &[u8]| chunk[0] as i8);
-impl_tiff_sample!(u16, 1, 16, 2, |chunk: &[u8]| u16::from_ne_bytes(chunk.try_into().unwrap()));
-impl_tiff_sample!(i16, 2, 16, 2, |chunk: &[u8]| i16::from_ne_bytes(chunk.try_into().unwrap()));
-impl_tiff_sample!(u32, 1, 32, 4, |chunk: &[u8]| u32::from_ne_bytes(chunk.try_into().unwrap()));
-impl_tiff_sample!(i32, 2, 32, 4, |chunk: &[u8]| i32::from_ne_bytes(chunk.try_into().unwrap()));
-impl_tiff_sample!(f32, 3, 32, 4, |chunk: &[u8]| f32::from_ne_bytes(chunk.try_into().unwrap()));
-impl_tiff_sample!(u64, 1, 64, 8, |chunk: &[u8]| u64::from_ne_bytes(chunk.try_into().unwrap()));
-impl_tiff_sample!(i64, 2, 64, 8, |chunk: &[u8]| i64::from_ne_bytes(chunk.try_into().unwrap()));
-impl_tiff_sample!(f64, 3, 64, 8, |chunk: &[u8]| f64::from_ne_bytes(chunk.try_into().unwrap()));
+impl_tiff_sample!(u16, 1, 16, 2, |chunk: &[u8]| u16::from_ne_bytes(
+    chunk.try_into().unwrap()
+));
+impl_tiff_sample!(i16, 2, 16, 2, |chunk: &[u8]| i16::from_ne_bytes(
+    chunk.try_into().unwrap()
+));
+impl_tiff_sample!(u32, 1, 32, 4, |chunk: &[u8]| u32::from_ne_bytes(
+    chunk.try_into().unwrap()
+));
+impl_tiff_sample!(i32, 2, 32, 4, |chunk: &[u8]| i32::from_ne_bytes(
+    chunk.try_into().unwrap()
+));
+impl_tiff_sample!(f32, 3, 32, 4, |chunk: &[u8]| f32::from_ne_bytes(
+    chunk.try_into().unwrap()
+));
+impl_tiff_sample!(u64, 1, 64, 8, |chunk: &[u8]| u64::from_ne_bytes(
+    chunk.try_into().unwrap()
+));
+impl_tiff_sample!(i64, 2, 64, 8, |chunk: &[u8]| i64::from_ne_bytes(
+    chunk.try_into().unwrap()
+));
+impl_tiff_sample!(f64, 3, 64, 8, |chunk: &[u8]| f64::from_ne_bytes(
+    chunk.try_into().unwrap()
+));
 
 impl TiffFile {
     /// Open a TIFF file from disk using memory-mapped I/O.
@@ -192,9 +208,19 @@ impl TiffFile {
     pub fn read_image_bytes(&self, ifd_index: usize) -> Result<Vec<u8>> {
         let ifd = self.ifd(ifd_index)?;
         if ifd.is_tiled() {
-            tile::read_image(self.source.as_ref(), ifd, self.byte_order(), &self.block_cache)
+            tile::read_image(
+                self.source.as_ref(),
+                ifd,
+                self.byte_order(),
+                &self.block_cache,
+            )
         } else {
-            strip::read_image(self.source.as_ref(), ifd, self.byte_order(), &self.block_cache)
+            strip::read_image(
+                self.source.as_ref(),
+                ifd,
+                self.byte_order(),
+                &self.block_cache,
+            )
         }
     }
 

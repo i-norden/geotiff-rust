@@ -6,8 +6,8 @@ Pure-Rust, read-only decoders for TIFF/BigTIFF and GeoTIFF/COG. No C libraries, 
 
 | Crate | Description |
 |---|---|
-| `tiff-reader` | Low-level TIFF/BigTIFF decoder (IFD parsing, strip/tile access, compression filters) |
-| `geotiff-reader` | GeoTIFF reader with GeoKey parsing, CRS extraction, overview discovery, and optional HTTP range-backed remote open support |
+| `tiff-reader` | TIFF/BigTIFF decoder with random-access sources, strip/tile reads, and typed raster decode |
+| `geotiff-reader` | GeoTIFF reader with CRS/transform extraction, overview discovery, and optional HTTP range-backed remote open |
 
 ## Usage
 
@@ -45,6 +45,7 @@ let pixels: ndarray::ArrayD<u16> = file.read_image(0)?;
 - Classic TIFF and BigTIFF support
 - Little-endian and big-endian byte orders
 - IFD chain traversal (multi-page/multi-image)
+- Random-access decode from mmap, in-memory bytes, or custom sources
 - Strip and tile data access
 - Compression: Deflate, LZW, PackBits, JPEG (optional), ZSTD (optional)
 - Parallel strip/tile decompression via Rayon
@@ -81,7 +82,7 @@ geotiff-reader = { version = "0.1", features = ["cog"] }  # + HTTP range-backed 
 ## Testing
 
 ```sh
-cargo test
+cargo test --all-features
 ```
 
 ## License

@@ -1,4 +1,8 @@
 //! HTTP range-backed remote GeoTIFF/COG access.
+//!
+//! This module opens remote objects through the same TIFF decoder core used for
+//! local files by providing a random-access byte source backed by cached range
+//! requests.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -84,7 +88,8 @@ impl HttpRangeSource {
     fn open(url: String, options: HttpOpenOptions) -> Result<Self> {
         let client = Client::builder().build()?;
         let len = probe_content_length(&client, &url)?;
-        let slots = NonZeroUsize::new(options.cache_slots).unwrap_or_else(|| NonZeroUsize::new(257).unwrap());
+        let slots = NonZeroUsize::new(options.cache_slots)
+            .unwrap_or_else(|| NonZeroUsize::new(257).unwrap());
         Ok(Self {
             client,
             url,
@@ -111,7 +116,9 @@ impl HttpRangeSource {
             .checked_mul(chunk_size)
             .ok_or_else(|| Error::Other("range chunk offset overflowed u64".into()))?;
         if start >= self.len {
-            return Err(Error::Other(format!("range chunk {index} starts beyond end of object")));
+            return Err(Error::Other(format!(
+                "range chunk {index} starts beyond end of object"
+            )));
         }
         let end = (start + chunk_size).min(self.len) - 1;
         let response = self
@@ -183,9 +190,9 @@ impl TiffSource for HttpRangeSource {
         let mut out = Vec::with_capacity(len);
 
         for chunk_index in first_chunk..=last_chunk {
-            let chunk = self
-                .chunk(chunk_index)
-                .map_err(|e| tiff_reader::TiffError::Other(format!("HTTP range read failed: {e}")))?;
+            let chunk = self.chunk(chunk_index).map_err(|e| {
+                tiff_reader::TiffError::Other(format!("HTTP range read failed: {e}"))
+            })?;
             let chunk_start = chunk_index * self.chunk_size as u64;
             let start_in_chunk = if chunk_index == first_chunk {
                 usize::try_from(offset - chunk_start).unwrap_or(0)
@@ -232,7 +239,9 @@ fn probe_content_length(client: &Client, url: &str) -> Result<u64> {
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| Error::Other(format!("missing Content-Range header for {url}")))?;
     parse_total_length(content_range).ok_or_else(|| {
-        Error::Other(format!("unable to parse object size from Content-Range: {content_range}"))
+        Error::Other(format!(
+            "unable to parse object size from Content-Range: {content_range}"
+        ))
     })
 }
 
@@ -306,9 +315,24 @@ mod tests {
             (277u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
             (278u16, 4u16, 1u32, le_u32(2).to_vec()),
             (279u16, 4u16, 1u32, le_u32(image_data.len() as u32).to_vec()),
-            (33550u16, 12u16, 3u32, scales.iter().flat_map(|value| le_f64(*value)).collect()),
-            (33922u16, 12u16, 6u32, tiepoints.iter().flat_map(|value| le_f64(*value)).collect()),
-            (34735u16, 3u16, geo_keys.len() as u32, geo_keys.iter().flat_map(|value| le_u16(*value)).collect()),
+            (
+                33550u16,
+                12u16,
+                3u32,
+                scales.iter().flat_map(|value| le_f64(*value)).collect(),
+            ),
+            (
+                33922u16,
+                12u16,
+                6u32,
+                tiepoints.iter().flat_map(|value| le_f64(*value)).collect(),
+            ),
+            (
+                34735u16,
+                3u16,
+                geo_keys.len() as u32,
+                geo_keys.iter().flat_map(|value| le_u16(*value)).collect(),
+            ),
             (42113u16, 2u16, nodata.len() as u32, nodata),
         ];
 

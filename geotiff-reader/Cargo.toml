@@ -1,6 +1,6 @@
 [package]
 name = "geotiff-reader"
-description = "Pure-Rust GeoTIFF and Cloud Optimized GeoTIFF (COG) reader"
+description = "Pure-Rust GeoTIFF reader with optional HTTP range-backed remote access"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

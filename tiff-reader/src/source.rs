@@ -1,3 +1,5 @@
+//! Random-access source abstraction used by the TIFF decoder.
+
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -36,7 +38,8 @@ pub struct MmapSource {
 impl MmapSource {
     pub fn open(path: &Path) -> Result<Self> {
         let file = File::open(path).map_err(|e| Error::Io(e, path.display().to_string()))?;
-        let mmap = unsafe { Mmap::map(&file) }.map_err(|e| Error::Io(e, path.display().to_string()))?;
+        let mmap =
+            unsafe { Mmap::map(&file) }.map_err(|e| Error::Io(e, path.display().to_string()))?;
         Ok(Self { mmap })
     }
 }

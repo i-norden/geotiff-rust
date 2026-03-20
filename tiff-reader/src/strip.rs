@@ -12,9 +12,16 @@ use crate::header::ByteOrder;
 use crate::ifd::{Ifd, RasterLayout};
 use crate::source::TiffSource;
 
-pub fn read_image(source: &dyn TiffSource, ifd: &Ifd, byte_order: ByteOrder, cache: &BlockCache) -> Result<Vec<u8>> {
+pub fn read_image(
+    source: &dyn TiffSource,
+    ifd: &Ifd,
+    byte_order: ByteOrder,
+    cache: &BlockCache,
+) -> Result<Vec<u8>> {
     let layout = ifd.raster_layout()?;
-    let offsets = ifd.strip_offsets().ok_or(Error::TagNotFound(crate::ifd::TAG_STRIP_OFFSETS))?;
+    let offsets = ifd
+        .strip_offsets()
+        .ok_or(Error::TagNotFound(crate::ifd::TAG_STRIP_OFFSETS))?;
     let counts = ifd
         .strip_byte_counts()
         .ok_or(Error::TagNotFound(crate::ifd::TAG_STRIP_BYTE_COUNTS))?;
@@ -73,14 +80,18 @@ pub fn read_image(source: &dyn TiffSource, ifd: &Ifd, byte_order: ByteOrder, cac
     #[cfg(not(feature = "rayon"))]
     let decoded_blocks: Result<Vec<_>> = specs
         .iter()
-        .map(|&spec| read_strip_block(source, ifd, byte_order, cache, spec, &layout).map(|block| (spec, block)))
+        .map(|&spec| {
+            read_strip_block(source, ifd, byte_order, cache, spec, &layout)
+                .map(|block| (spec, block))
+        })
         .collect();
 
     #[cfg(feature = "rayon")]
     let decoded_blocks: Result<Vec<_>> = specs
         .par_iter()
         .map(|&spec| {
-            read_strip_block(source, ifd, byte_order, cache, spec, &layout).map(|block| (spec, block))
+            read_strip_block(source, ifd, byte_order, cache, spec, &layout)
+                .map(|block| (spec, block))
         })
         .collect();
 
@@ -95,7 +106,9 @@ pub fn read_image(source: &dyn TiffSource, ifd: &Ifd, byte_order: ByteOrder, cac
             let block_len = spec
                 .rows_in_strip
                 .checked_mul(layout.row_bytes())
-                .ok_or_else(|| Error::InvalidImageLayout("strip byte length overflows usize".into()))?;
+                .ok_or_else(|| {
+                    Error::InvalidImageLayout("strip byte length overflows usize".into())
+                })?;
             output[dest_offset..dest_offset + block_len].copy_from_slice(&block[..block_len]);
         } else {
             let src_row_bytes = layout.sample_plane_row_bytes();
@@ -103,11 +116,15 @@ pub fn read_image(source: &dyn TiffSource, ifd: &Ifd, byte_order: ByteOrder, cac
                 let src_row = &block[row * src_row_bytes..(row + 1) * src_row_bytes];
                 let dest_row_offset = (spec.row_start + row)
                     .checked_mul(layout.row_bytes())
-                    .ok_or_else(|| Error::InvalidImageLayout("row offset overflows usize".into()))?;
+                    .ok_or_else(|| {
+                        Error::InvalidImageLayout("row offset overflows usize".into())
+                    })?;
                 let dest_row = &mut output[dest_row_offset..dest_row_offset + layout.row_bytes()];
                 for col in 0..layout.width {
-                    let src = &src_row[col * layout.bytes_per_sample..(col + 1) * layout.bytes_per_sample];
-                    let pixel_base = col * layout.pixel_stride_bytes() + spec.plane * layout.bytes_per_sample;
+                    let src = &src_row
+                        [col * layout.bytes_per_sample..(col + 1) * layout.bytes_per_sample];
+                    let pixel_base =
+                        col * layout.pixel_stride_bytes() + spec.plane * layout.bytes_per_sample;
                     dest_row[pixel_base..pixel_base + layout.bytes_per_sample].copy_from_slice(src);
                 }
             }

@@ -123,7 +123,10 @@ impl Ifd {
 
     /// Rows per strip. Defaults to the image height when not present.
     pub fn rows_per_strip(&self) -> Option<u32> {
-        Some(self.tag_u32(TAG_ROWS_PER_STRIP).unwrap_or_else(|| self.height()))
+        Some(
+            self.tag_u32(TAG_ROWS_PER_STRIP)
+                .unwrap_or_else(|| self.height()),
+        )
     }
 
     /// Sample format for each channel.
@@ -286,7 +289,11 @@ pub fn parse_ifd_chain(source: &dyn TiffSource, header: &TiffHeader) -> Result<V
 
 fn read_ifd(source: &dyn TiffSource, header: &TiffHeader, offset: u64) -> Result<(Vec<Tag>, u64)> {
     let entry_count_size = if header.is_bigtiff() { 8usize } else { 2usize };
-    let entry_size = if header.is_bigtiff() { 20usize } else { 12usize };
+    let entry_size = if header.is_bigtiff() {
+        20usize
+    } else {
+        12usize
+    };
     let next_offset_size = if header.is_bigtiff() { 8usize } else { 4usize };
 
     let count_bytes = source.read_exact_at(offset, entry_count_size)?;
@@ -347,7 +354,14 @@ fn parse_tags_classic(
         let type_code = cursor.read_u16()?;
         let value_count = cursor.read_u32()? as u64;
         let value_offset_bytes = cursor.read_bytes(4)?;
-        let tag = Tag::parse_classic(code, type_code, value_count, value_offset_bytes, source, byte_order)?;
+        let tag = Tag::parse_classic(
+            code,
+            type_code,
+            value_count,
+            value_offset_bytes,
+            source,
+            byte_order,
+        )?;
         tags.push(tag);
     }
     tags.sort_by_key(|tag| tag.code);
@@ -367,7 +381,14 @@ fn parse_tags_bigtiff(
         let type_code = cursor.read_u16()?;
         let value_count = cursor.read_u64()?;
         let value_offset_bytes = cursor.read_bytes(8)?;
-        let tag = Tag::parse_bigtiff(code, type_code, value_count, value_offset_bytes, source, byte_order)?;
+        let tag = Tag::parse_bigtiff(
+            code,
+            type_code,
+            value_count,
+            value_offset_bytes,
+            source,
+            byte_order,
+        )?;
         tags.push(tag);
     }
     tags.sort_by_key(|tag| tag.code);
@@ -376,7 +397,10 @@ fn parse_tags_bigtiff(
 
 #[cfg(test)]
 mod tests {
-    use super::{Ifd, RasterLayout, TAG_BITS_PER_SAMPLE, TAG_IMAGE_LENGTH, TAG_IMAGE_WIDTH, TAG_SAMPLE_FORMAT, TAG_SAMPLES_PER_PIXEL};
+    use super::{
+        Ifd, RasterLayout, TAG_BITS_PER_SAMPLE, TAG_IMAGE_LENGTH, TAG_IMAGE_WIDTH,
+        TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT,
+    };
     use crate::tag::{Tag, TagType, TagValue};
 
     fn make_ifd(tags: Vec<Tag>) -> Ifd {
