@@ -76,6 +76,14 @@ fn reads_real_world_signed_and_compressed_geotiffs() {
     assert_eq!(raster.shape(), &[20, 20]);
 }
 
+#[test]
+fn reads_real_world_cog_locally() {
+    let file =
+        GeoTiffFile::open(fixture("gdal/gcore/data/cog/byte_little_endian_golden.tif")).unwrap();
+    let raster: ArrayD<u8> = file.read_raster().unwrap();
+    assert_eq!(raster.shape(), &[20, 20]);
+}
+
 #[cfg(feature = "cog")]
 #[test]
 fn opens_real_world_cog_over_http_ranges() {
@@ -105,10 +113,13 @@ fn opens_real_world_cog_over_http_ranges() {
 }
 
 #[cfg(feature = "cog")]
+type ServedRanges = Arc<Mutex<Vec<Option<(usize, usize)>>>>;
+
+#[cfg(feature = "cog")]
 struct TestServer {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
-    served_ranges: Arc<Mutex<Vec<Option<(usize, usize)>>>>,
+    served_ranges: ServedRanges,
     handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -120,7 +131,7 @@ impl TestServer {
         let addr = listener.local_addr().ok()?;
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = stop.clone();
-        let served_ranges = Arc::new(Mutex::new(Vec::new()));
+        let served_ranges: ServedRanges = Arc::new(Mutex::new(Vec::new()));
         let served_ranges_worker = served_ranges.clone();
 
         let handle = thread::spawn(move || {
