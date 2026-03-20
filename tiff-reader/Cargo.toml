@@ -1,0 +1,45 @@
+[package]
+name = "tiff-reader"
+description = "Pure-Rust, read-only TIFF/BigTIFF file decoder with no C dependencies"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../README.md"
+documentation = "https://docs.rs/tiff-reader"
+keywords = ["tiff", "bigtiff", "decoder", "raster", "read-only"]
+categories = ["science", "parser-implementations"]
+
+[dependencies]
+ndarray = { workspace = true }
+thiserror = { workspace = true }
+memmap2 = { workspace = true }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+weezl = "0.1"
+lru = "0.12"
+parking_lot = "0.12"
+smallvec = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = ["rayon", "jpeg", "zstd"]
+rayon = ["dep:rayon"]
+jpeg = ["dep:jpeg-decoder"]
+zstd = ["dep:zstd"]
+
+[dependencies.rayon]
+version = "1"
+optional = true
+
+[dependencies.jpeg-decoder]
+version = "0.3"
+optional = true
+
+[dependencies.zstd]
+version = "0.13"
+default-features = false
+optional = true

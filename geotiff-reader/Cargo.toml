@@ -1,0 +1,37 @@
+[package]
+name = "geotiff-reader"
+description = "Pure-Rust GeoTIFF and Cloud Optimized GeoTIFF (COG) reader"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../README.md"
+documentation = "https://docs.rs/geotiff-reader"
+keywords = ["geotiff", "cog", "raster", "gis", "read-only"]
+categories = ["science", "parser-implementations"]
+
+[dependencies]
+ndarray = { workspace = true }
+thiserror = { workspace = true }
+memmap2 = { workspace = true }
+tiff-reader = { version = "0.1.0", path = "../tiff-reader", optional = true }
+rayon = { version = "1", optional = true }
+lru = "0.12"
+parking_lot = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = ["local", "rayon"]
+local = ["dep:tiff-reader"]
+rayon = ["dep:rayon", "local", "tiff-reader/rayon"]
+cog = ["dep:reqwest"]
+
+[dependencies.reqwest]
+version = "0.12"
+default-features = false
+features = ["blocking", "rustls-tls"]
+optional = true
