@@ -111,24 +111,24 @@ impl<W: Write + Seek> TiffWriter<W> {
         let (offsets_tag, byte_counts_tag) = builder.offset_tag_codes();
         let layout_tags = builder.layout_tags();
 
-        let tags = encoder::build_image_tags(
-            builder.width,
-            builder.height,
-            builder.samples_per_pixel,
-            builder.bits_per_sample,
-            builder.sample_format.to_code(),
-            builder.compression.to_code(),
-            builder.photometric.to_code(),
-            builder.predictor.to_code(),
-            builder.planar_configuration.to_code(),
-            builder.subfile_type,
-            &builder.extra_tags,
-            offsets_tag,
-            byte_counts_tag,
+        let tags = encoder::build_image_tags(&encoder::ImageTagParams {
+            width: builder.width,
+            height: builder.height,
+            samples_per_pixel: builder.samples_per_pixel,
+            bits_per_sample: builder.bits_per_sample,
+            sample_format: builder.sample_format.to_code(),
+            compression: builder.compression.to_code(),
+            photometric: builder.photometric.to_code(),
+            predictor: builder.predictor.to_code(),
+            planar_configuration: builder.planar_configuration.to_code(),
+            subfile_type: builder.subfile_type,
+            extra_tags: &builder.extra_tags,
+            offsets_tag_code: offsets_tag,
+            byte_counts_tag_code: byte_counts_tag,
             num_blocks,
-            &layout_tags,
-            self.is_bigtiff,
-        );
+            layout_tags: &layout_tags,
+            is_bigtiff: self.is_bigtiff,
+        });
 
         let ifd_result = encoder::write_ifd(
             &mut self.sink,

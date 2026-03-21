@@ -220,101 +220,122 @@ pub fn patch_next_ifd<W: Write + Seek>(
     Ok(())
 }
 
+/// Parameters for building image tags.
+pub struct ImageTagParams<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub samples_per_pixel: u16,
+    pub bits_per_sample: u16,
+    pub sample_format: u16,
+    pub compression: u16,
+    pub photometric: u16,
+    pub predictor: u16,
+    pub planar_configuration: u16,
+    pub subfile_type: u32,
+    pub extra_tags: &'a [Tag],
+    pub offsets_tag_code: u16,
+    pub byte_counts_tag_code: u16,
+    pub num_blocks: usize,
+    pub layout_tags: &'a [Tag],
+    pub is_bigtiff: bool,
+}
+
 /// Build standard TIFF tags for an image.
 /// For BigTIFF, offset/bytecount arrays use Long8 instead of Long.
-pub fn build_image_tags(
-    width: u32,
-    height: u32,
-    samples_per_pixel: u16,
-    bits_per_sample: u16,
-    sample_format: u16,
-    compression: u16,
-    photometric: u16,
-    predictor: u16,
-    planar_configuration: u16,
-    subfile_type: u32,
-    extra_tags: &[Tag],
-    offsets_tag_code: u16,
-    byte_counts_tag_code: u16,
-    num_blocks: usize,
-    layout_tags: &[Tag],
-    is_bigtiff: bool,
-) -> Vec<Tag> {
+pub fn build_image_tags(p: &ImageTagParams<'_>) -> Vec<Tag> {
+    let ImageTagParams {
+        width,
+        height,
+        samples_per_pixel,
+        bits_per_sample,
+        sample_format,
+        compression,
+        photometric,
+        predictor,
+        planar_configuration,
+        subfile_type,
+        extra_tags,
+        offsets_tag_code,
+        byte_counts_tag_code,
+        num_blocks,
+        layout_tags,
+        is_bigtiff,
+    } = p;
     let mut tags = Vec::with_capacity(16 + extra_tags.len());
 
-    if subfile_type != 0 {
+    if *subfile_type != 0 {
         tags.push(Tag::new(
             tiff_core::TAG_NEW_SUBFILE_TYPE,
-            TagValue::Long(vec![subfile_type]),
+            TagValue::Long(vec![*subfile_type]),
         ));
     }
     tags.push(Tag::new(
         tiff_core::TAG_IMAGE_WIDTH,
-        TagValue::Long(vec![width]),
+        TagValue::Long(vec![*width]),
     ));
     tags.push(Tag::new(
         tiff_core::TAG_IMAGE_LENGTH,
-        TagValue::Long(vec![height]),
+        TagValue::Long(vec![*height]),
     ));
     tags.push(Tag::new(
         tiff_core::TAG_BITS_PER_SAMPLE,
-        TagValue::Short(vec![bits_per_sample; samples_per_pixel as usize]),
+        TagValue::Short(vec![*bits_per_sample; *samples_per_pixel as usize]),
     ));
     tags.push(Tag::new(
         tiff_core::TAG_COMPRESSION,
-        TagValue::Short(vec![compression]),
+        TagValue::Short(vec![*compression]),
     ));
     tags.push(Tag::new(
         tiff_core::TAG_PHOTOMETRIC_INTERPRETATION,
-        TagValue::Short(vec![photometric]),
+        TagValue::Short(vec![*photometric]),
     ));
     tags.push(Tag::new(
         tiff_core::TAG_SAMPLES_PER_PIXEL,
-        TagValue::Short(vec![samples_per_pixel]),
+        TagValue::Short(vec![*samples_per_pixel]),
     ));
-    if planar_configuration != 1 {
+    if *planar_configuration != 1 {
         tags.push(Tag::new(
             tiff_core::TAG_PLANAR_CONFIGURATION,
-            TagValue::Short(vec![planar_configuration]),
+            TagValue::Short(vec![*planar_configuration]),
         ));
     }
-    if predictor != 1 {
+    if *predictor != 1 {
         tags.push(Tag::new(
             tiff_core::TAG_PREDICTOR,
-            TagValue::Short(vec![predictor]),
+            TagValue::Short(vec![*predictor]),
         ));
     }
     tags.push(Tag::new(
         tiff_core::TAG_SAMPLE_FORMAT,
-        TagValue::Short(vec![sample_format; samples_per_pixel as usize]),
+        TagValue::Short(vec![*sample_format; *samples_per_pixel as usize]),
     ));
 
-    for lt in layout_tags {
+    for lt in *layout_tags {
         tags.push(lt.clone());
     }
 
     // Offset and bytecount placeholder arrays
-    if is_bigtiff {
+    if *is_bigtiff {
         tags.push(Tag::new(
-            offsets_tag_code,
-            TagValue::Long8(vec![0u64; num_blocks]),
+            *offsets_tag_code,
+            TagValue::Long8(vec![0u64; *num_blocks]),
         ));
         tags.push(Tag::new(
-            byte_counts_tag_code,
-            TagValue::Long8(vec![0u64; num_blocks]),
+            *byte_counts_tag_code,
+            TagValue::Long8(vec![0u64; *num_blocks]),
         ));
     } else {
         tags.push(Tag::new(
-            offsets_tag_code,
-            TagValue::Long(vec![0u32; num_blocks]),
+            *offsets_tag_code,
+            TagValue::Long(vec![0u32; *num_blocks]),
         ));
         tags.push(Tag::new(
-            byte_counts_tag_code,
-            TagValue::Long(vec![0u32; num_blocks]),
+            *byte_counts_tag_code,
+            TagValue::Long(vec![0u32; *num_blocks]),
         ));
     }
 
-    for tag in extra_tags {
+    for tag in *extra_tags {
         tags.push(tag.clone());
     }
 

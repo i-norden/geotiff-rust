@@ -72,8 +72,8 @@ impl<T: WriteSample, W: Write + Seek> StreamingTileWriter<T, W> {
 
         let ib = builder.to_image_builder::<T>();
         let num_blocks = ib.block_count();
-        let tiles_across = (builder.width as usize + tw as usize - 1) / tw as usize;
-        let tiles_down = (builder.height as usize + th as usize - 1) / th as usize;
+        let tiles_across = (builder.width as usize).div_ceil(tw as usize);
+        let tiles_down = (builder.height as usize).div_ceil(th as usize);
 
         let mut writer = TiffWriter::new(sink, WriteOptions::default())?;
         let handle = writer.add_image(ib)?;

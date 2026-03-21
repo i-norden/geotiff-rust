@@ -152,8 +152,8 @@ impl CogBuilder {
 
         let mut overview_handles: Vec<(ImageHandle, u32, u32)> = Vec::new();
         for &level in &sorted_levels {
-            let ovr_w = ((self.inner.width as usize + level as usize - 1) / level as usize) as u32;
-            let ovr_h = ((self.inner.height as usize + level as usize - 1) / level as usize) as u32;
+            let ovr_w = (self.inner.width as usize).div_ceil(level as usize) as u32;
+            let ovr_h = (self.inner.height as usize).div_ceil(level as usize) as u32;
 
             let mut ovr_ib = ImageBuilder::new(ovr_w, ovr_h)
                 .sample_type::<T>()
@@ -244,8 +244,8 @@ impl CogBuilder {
             .iter()
             .map(|&level| {
                 let level = level as usize;
-                let ovr_w = (width + level - 1) / level;
-                let ovr_h = (height + level - 1) / level;
+                let ovr_w = width.div_ceil(level);
+                let ovr_h = height.div_ceil(level);
 
                 match self.resampling {
                     Resampling::NearestNeighbor => {
@@ -308,8 +308,8 @@ impl<T: WriteSample, W: Write + Seek> CogTileWriter<T, W> {
     fn new(cog: CogBuilder, sink: W) -> Result<Self> {
         let tw = cog.inner.tile_width.unwrap_or(256);
         let th = cog.inner.tile_height.unwrap_or(256);
-        let tiles_across = (cog.inner.width as usize + tw as usize - 1) / tw as usize;
-        let tiles_down = (cog.inner.height as usize + th as usize - 1) / th as usize;
+        let tiles_across = (cog.inner.width as usize).div_ceil(tw as usize);
+        let tiles_down = (cog.inner.height as usize).div_ceil(th as usize);
         let num_base_tiles = tiles_across * tiles_down;
 
         let fill_value = {
@@ -335,8 +335,8 @@ impl<T: WriteSample, W: Write + Seek> CogTileWriter<T, W> {
 
         let mut overview_handles = Vec::new();
         for &level in &sorted_levels {
-            let ovr_w = ((cog.inner.width as usize + level as usize - 1) / level as usize) as u32;
-            let ovr_h = ((cog.inner.height as usize + level as usize - 1) / level as usize) as u32;
+            let ovr_w = (cog.inner.width as usize).div_ceil(level as usize) as u32;
+            let ovr_h = (cog.inner.height as usize).div_ceil(level as usize) as u32;
 
             let mut ovr_ib = ImageBuilder::new(ovr_w, ovr_h)
                 .sample_type::<T>()
@@ -548,8 +548,8 @@ fn write_tiled_data<T: WriteSample, W: Write + Seek>(
     width: usize,
     height: usize,
 ) -> Result<()> {
-    let tiles_across = (width + tw - 1) / tw;
-    let tiles_down = (height + th - 1) / th;
+    let tiles_across = width.div_ceil(tw);
+    let tiles_down = height.div_ceil(th);
     let zero = T::decode_many(&vec![0u8; T::BYTES_PER_SAMPLE])[0];
 
     for tile_row in 0..tiles_down {
@@ -586,8 +586,8 @@ fn write_tiled_data_f64_to<T: WriteSample, W: Write + Seek>(
     width: usize,
     height: usize,
 ) -> Result<()> {
-    let tiles_across = (width + tw - 1) / tw;
-    let tiles_down = (height + th - 1) / th;
+    let tiles_across = width.div_ceil(tw);
+    let tiles_down = height.div_ceil(th);
     let zero = T::decode_many(&vec![0u8; T::BYTES_PER_SAMPLE])[0];
 
     for tile_row in 0..tiles_down {
@@ -840,7 +840,6 @@ mod tests {
         // All IFDs should come before any tile data.
         // Tile data starts at the first strip/tile offset.
         let mut min_data_offset = u64::MAX;
-        let mut max_ifd_end = 0u64;
 
         for i in 0..file.ifd_count() {
             let ifd = file.ifd(i).unwrap();

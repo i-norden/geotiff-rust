@@ -355,7 +355,7 @@ impl GeoTiffBuilder {
         if let (Some(tw), Some(th)) = (self.tile_width, self.tile_height) {
             let tw = tw as usize;
             let th = th as usize;
-            let tiles_across = (self.width as usize + tw - 1) / tw;
+            let tiles_across = (self.width as usize).div_ceil(tw);
             let tile_row = block_idx / tiles_across;
             let tile_col = block_idx % tiles_across;
             let start_row = tile_row * th;
@@ -399,7 +399,7 @@ impl GeoTiffBuilder {
         if let (Some(tw), Some(th)) = (self.tile_width, self.tile_height) {
             let tw = tw as usize;
             let th = th as usize;
-            let tiles_across = (self.width as usize + tw - 1) / tw;
+            let tiles_across = (self.width as usize).div_ceil(tw);
             let tile_row = block_idx / tiles_across;
             let tile_col = block_idx % tiles_across;
             let start_row = tile_row * th;

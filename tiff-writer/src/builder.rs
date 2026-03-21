@@ -126,13 +126,13 @@ impl ImageBuilder {
         match self.layout {
             DataLayout::Strips { rows_per_strip } => {
                 let rps = rows_per_strip.max(1) as usize;
-                (self.height as usize + rps - 1) / rps
+                (self.height as usize).div_ceil(rps)
             }
             DataLayout::Tiles { width, height } => {
                 let tw = width.max(1) as usize;
                 let th = height.max(1) as usize;
-                let tiles_across = (self.width as usize + tw - 1) / tw;
-                let tiles_down = (self.height as usize + th - 1) / th;
+                let tiles_across = (self.width as usize).div_ceil(tw);
+                let tiles_down = (self.height as usize).div_ceil(th);
                 tiles_across * tiles_down
             }
         }
