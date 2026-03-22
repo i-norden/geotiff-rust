@@ -145,6 +145,7 @@ def command_benchmark(args):
 
     payload = {
         "iterations": args.iterations,
+        "total_seconds": sum(timings),
         "min_seconds": min(timings),
         "median_seconds": statistics.median(timings),
         "max_seconds": max(timings),

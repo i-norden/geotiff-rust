@@ -2,19 +2,23 @@
 
 use std::fs::File;
 use std::io::BufWriter;
-use std::time::Instant;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use geotiff_core::geokeys::{self, GeoKeyDirectory, GeoKeyValue};
 use geotiff_core::tags;
+use geotiff_reader::GeoTiffFile;
 use ndarray::ArrayD;
 use tempfile::NamedTempFile;
 use tiff_core::{Compression, Tag, TagValue};
 use tiff_writer::{ImageBuilder, TiffWriter, WriteOptions};
 
-use geotiff_reader::GeoTiffFile;
-
 #[path = "../../test-support/reference.rs"]
 mod reference;
+
+const RUST_IMPL_NAME: &str = "geotiff-rust";
+const REFERENCE_IMPL_NAME: &str = "gdal";
 
 fn build_geo_tags() -> Vec<Tag> {
     let mut geokeys = GeoKeyDirectory::new();
@@ -56,7 +60,7 @@ fn build_geo_tags() -> Vec<Tag> {
     tags_out
 }
 
-fn write_benchmark_fixture(path: &std::path::Path) {
+fn write_benchmark_fixture(path: &Path) {
     let width = 2048u32;
     let height = 2048u32;
     let tile = 256u32;
@@ -98,15 +102,43 @@ fn write_benchmark_fixture(path: &std::path::Path) {
     tiff_writer.finish().unwrap();
 }
 
-fn median_seconds(samples: &[f64]) -> f64 {
-    let mut values = samples.to_vec();
-    values.sort_by(|left, right| left.partial_cmp(right).unwrap());
-    values[values.len() / 2]
+fn rust_hash(path: &Path) -> (usize, String) {
+    let file = GeoTiffFile::open(path).unwrap();
+    assert_eq!(file.epsg(), Some(32615));
+    let raster: ArrayD<u16> = file.read_raster().unwrap();
+    reference::array_hash(&raster)
 }
 
-#[test]
-#[ignore = "runs an explicit timing comparison against GDAL"]
-fn compares_open_and_full_decode_throughput_against_gdal() {
+fn gdal_hash(manifest_dir: &str, fixture_path: &str) -> (usize, String) {
+    let reference_json = reference::run_reference_json(manifest_dir, &["hash", fixture_path]);
+    (
+        reference_json["byte_len"].as_u64().unwrap() as usize,
+        reference_json["hash"].as_str().unwrap().to_string(),
+    )
+}
+
+fn gdal_benchmark_duration(
+    manifest_dir: &str,
+    fixture_path: &str,
+    iterations: usize,
+    expected: &(usize, String),
+) -> Duration {
+    let iteration_arg = iterations.to_string();
+    let reference_json = reference::run_reference_json(
+        manifest_dir,
+        &["benchmark", fixture_path, "--iterations", &iteration_arg],
+    );
+
+    assert_eq!(
+        reference_json["byte_len"].as_u64().unwrap() as usize,
+        expected.0
+    );
+    assert_eq!(reference_json["hash"].as_str().unwrap(), expected.1);
+
+    Duration::from_secs_f64(reference_json["total_seconds"].as_f64().unwrap())
+}
+
+fn bench_open_and_full_decode(c: &mut Criterion) {
     if !reference::python_gdal_available() {
         eprintln!("skipping GDAL benchmark because Python GDAL bindings are unavailable");
         return;
@@ -115,52 +147,41 @@ fn compares_open_and_full_decode_throughput_against_gdal() {
     let fixture = NamedTempFile::new().unwrap();
     write_benchmark_fixture(fixture.path());
 
-    let iterations = std::env::var("GEOTIFF_RUST_BENCH_ITERATIONS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(5)
-        .max(1);
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let fixture_path = fixture.path().to_str().unwrap().to_string();
-    let iteration_arg = iterations.to_string();
-    let reference_json = reference::run_reference_json(
-        env!("CARGO_MANIFEST_DIR"),
-        &["benchmark", &fixture_path, "--iterations", &iteration_arg],
+    let expected = rust_hash(fixture.path());
+    assert_eq!(gdal_hash(manifest_dir, &fixture_path), expected);
+
+    let mut group = c.benchmark_group("geotiff-reader/open-and-full-decode-vs-gdal");
+    group.throughput(Throughput::Bytes(expected.0 as u64));
+
+    group.bench_function(BenchmarkId::new(RUST_IMPL_NAME, "geotiff-reader"), |b| {
+        b.iter_custom(|iters| {
+            let iterations = usize::try_from(iters).expect("criterion iteration count overflowed");
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let file = GeoTiffFile::open(fixture.path()).unwrap();
+                assert_eq!(file.epsg(), Some(32615));
+                let raster: ArrayD<u16> = file.read_raster().unwrap();
+                black_box(raster);
+            }
+            start.elapsed()
+        });
+    });
+
+    group.bench_function(
+        BenchmarkId::new(REFERENCE_IMPL_NAME, "geotiff-reader"),
+        |b| {
+            b.iter_custom(|iters| {
+                let iterations =
+                    usize::try_from(iters).expect("criterion iteration count overflowed");
+                gdal_benchmark_duration(manifest_dir, &fixture_path, iterations, &expected)
+            });
+        },
     );
 
-    let mut timings = Vec::with_capacity(iterations);
-    let mut hashes = Vec::with_capacity(iterations);
-    for _ in 0..iterations {
-        let start = Instant::now();
-        let file = GeoTiffFile::open(fixture.path()).unwrap();
-        assert_eq!(file.epsg(), Some(32615));
-        let raster: ArrayD<u16> = file.read_raster().unwrap();
-        timings.push(start.elapsed().as_secs_f64());
-        hashes.push(reference::array_hash(&raster));
-    }
-
-    let (byte_len, hash) = hashes[0].clone();
-    assert!(hashes.iter().all(|value| value == &hashes[0]));
-    assert_eq!(
-        reference_json["byte_len"].as_u64().unwrap() as usize,
-        byte_len
-    );
-    assert_eq!(reference_json["hash"].as_str().unwrap(), hash);
-
-    let rust_median = median_seconds(&timings);
-    let gdal_median = reference_json["median_seconds"].as_f64().unwrap();
-    let slowdown = rust_median / gdal_median;
-
-    println!(
-        "geotiff-reader median={rust_median:.6}s gdal median={gdal_median:.6}s slowdown={slowdown:.3}x"
-    );
-
-    if let Some(limit) = std::env::var("GEOTIFF_RUST_BENCH_MAX_SLOWDOWN")
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
-    {
-        assert!(
-            slowdown <= limit,
-            "geotiff-reader slowdown {slowdown:.3}x exceeded configured limit {limit:.3}x"
-        );
-    }
+    group.finish();
 }
+
+criterion_group!(benches, bench_open_and_full_decode);
+criterion_main!(benches);

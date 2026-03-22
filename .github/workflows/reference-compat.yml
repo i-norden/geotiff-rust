@@ -1,0 +1,52 @@
+name: Reference Compat
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_benchmarks:
+        description: Run the Criterion GDAL/libtiff comparison benches and upload reports
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  parity:
+    name: GDAL/libtiff Parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run Docker parity checks
+        run: ./scripts/run-reference-parity.sh
+
+  benchmark:
+    name: GDAL/libtiff Comparison Bench
+    runs-on: ubuntu-latest
+    needs: parity
+    if: ${{ inputs.run_benchmarks }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run Docker Criterion comparison benches
+        run: ./scripts/run-reference-benchmarks.sh
+      - name: Upload Criterion reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-gdal-compat
+          path: target/criterion
+          if-no-files-found: error

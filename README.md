@@ -118,23 +118,24 @@ Lossless codecs use exact byte/hash parity. The JPEG fixture uses a strict bound
 For a reproducible reference environment, run the Docker harness:
 
 ```sh
-./scripts/run-reference-tests-in-docker.sh
+./scripts/run-reference-parity.sh
 ```
 
-That image installs Rust, GDAL Python bindings, and `libtiff-tools`, then runs:
+Criterion comparison benches against GDAL are available through a separate Docker entrypoint:
 
 ```sh
-cargo test --workspace
-cargo test -p tiff-reader --test reference_benchmark -- --ignored --nocapture
-cargo test -p geotiff-reader --test reference_benchmark -- --ignored --nocapture
+./scripts/run-reference-benchmarks.sh
 ```
 
-Benchmark comparison tests are intentionally `ignored` by default. Tune them with:
+That image installs Rust, GDAL Python bindings, and `libtiff-tools`, then runs the parity integration tests or Criterion comparison benches inside a standardized environment.
+
+The manual `reference-compat` workflow can run parity only, or parity plus the comparison benches, and uploads `target/criterion` artifacts for inspection. Treat benchmark numbers from shared CI runners as smoke signals, not authoritative performance claims.
+
+You can also run the bench targets directly if GDAL is available locally:
 
 ```sh
-GEOTIFF_RUST_BENCH_ITERATIONS=10 \
-GEOTIFF_RUST_BENCH_MAX_SLOWDOWN=3.0 \
-./scripts/run-reference-tests-in-docker.sh
+cargo bench -p tiff-reader --bench reference_compare_bench
+cargo bench -p geotiff-reader --bench reference_compare_bench
 ```
 
 ## License
