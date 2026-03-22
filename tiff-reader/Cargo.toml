@@ -24,7 +24,14 @@ parking_lot = "0.12"
 smallvec = "1"
 
 [dev-dependencies]
+criterion = "0.5"
 tempfile = "3"
+serde_json = "1"
+tiff-writer = { version = "0.2.0", path = "../tiff-writer" }
+
+[[bench]]
+name = "reference_compare_bench"
+harness = false
 
 [features]
 default = ["rayon", "jpeg", "zstd"]

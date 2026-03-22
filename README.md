@@ -112,6 +112,21 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+Reference-library parity tests are included for `tiff-reader` and
+`geotiff-reader`. They compare this workspace against GDAL/libtiff when those
+tools are available locally; otherwise they self-skip. Lossless codecs use
+exact byte and hash parity. The JPEG fixture uses a strict bounded-delta check
+because compliant decoders can differ by +/-1 in a small number of samples.
+
+For a reproducible reference environment, run the Docker harness:
+
+```sh
+./scripts/run-reference-parity.sh
+```
+
+For reference comparisons and current benchmark results against GDAL/libtiff,
+see [docs/benchmark-report.md](docs/benchmark-report.md).
+
 ## License
 
 MIT OR Apache-2.0
