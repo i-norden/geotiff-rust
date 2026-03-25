@@ -64,7 +64,7 @@ jobs:
       - name: Test GeoTIFF reader with no default features
         run: cargo test -p geotiff-reader --no-default-features
 
-      - name: Test GeoTIFF reader with COG only
+      - name: Test GeoTIFF reader with COG feature set (includes local)
         run: cargo test -p geotiff-reader --no-default-features --features cog
 
   corpus:
