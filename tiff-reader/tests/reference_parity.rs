@@ -70,7 +70,7 @@ fn parse_tiffdump(output: &str) -> TiffDumpExpectation {
             directory.compression = parse_scalar_u16(line);
         } else if line.starts_with("SamplesPerPixel ") {
             directory.samples_per_pixel = parse_scalar_u16(line);
-        } else if line.starts_with("PlanarConfiguration ") {
+        } else if line.starts_with("PlanarConfiguration ") || line.starts_with("PlanarConfig ") {
             directory.planar_configuration = parse_scalar_u16(line);
         } else if line.starts_with("SampleFormat ") {
             directory.sample_format = parse_u16_list(line);

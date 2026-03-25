@@ -134,7 +134,13 @@ fn collect_strip_specs(ifd: &Ifd, layout: &RasterLayout) -> Result<Vec<StripBloc
         )));
     }
 
-    let rows_per_strip = ifd.rows_per_strip().unwrap_or(ifd.height()) as usize;
+    let rows_per_strip = ifd.rows_per_strip().unwrap_or(ifd.height());
+    if rows_per_strip == 0 {
+        return Err(Error::InvalidImageLayout(
+            "RowsPerStrip must be greater than zero".into(),
+        ));
+    }
+    let rows_per_strip = rows_per_strip as usize;
     let strips_per_plane = layout.height.div_ceil(rows_per_strip);
     let expected = match layout.planar_configuration {
         1 => strips_per_plane,
