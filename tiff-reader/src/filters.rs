@@ -3,6 +3,8 @@
 #[cfg(any(feature = "jpeg", feature = "zstd"))]
 use std::io::Cursor;
 use std::io::Read;
+#[cfg(feature = "jpeg")]
+use std::panic::{self, AssertUnwindSafe};
 
 use crate::error::{Error, Result};
 use crate::header::ByteOrder;
@@ -142,8 +144,18 @@ fn decompress_packbits(data: &[u8], index: usize) -> Result<Vec<u8>> {
 #[cfg(feature = "jpeg")]
 fn decompress_jpeg(data: &[u8], index: usize, jpeg_tables: Option<&[u8]>) -> Result<Vec<u8>> {
     let stream = merge_jpeg_stream(jpeg_tables, data);
-    let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(stream));
-    decoder.decode().map_err(|e| Error::DecompressionFailed {
+    panic::catch_unwind(AssertUnwindSafe(|| {
+        let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(stream));
+        decoder.decode()
+    }))
+    .map_err(|payload| Error::DecompressionFailed {
+        index,
+        reason: format!(
+            "JPEG decoder panicked: {}",
+            panic_payload_message(payload.as_ref())
+        ),
+    })?
+    .map_err(|e| Error::DecompressionFailed {
         index,
         reason: format!("JPEG: {e}"),
     })
@@ -185,6 +197,17 @@ fn merge_jpeg_stream(jpeg_tables: Option<&[u8]>, scan_data: &[u8]) -> Vec<u8> {
         merged.extend_from_slice(&[0xff, 0xd9]);
     }
     merged
+}
+
+#[cfg(feature = "jpeg")]
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic payload".into()
+    }
 }
 
 fn fix_endianness(buf: &mut [u8], byte_order: ByteOrder, bit_depth: u16) {

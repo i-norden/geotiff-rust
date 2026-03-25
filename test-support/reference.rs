@@ -7,6 +7,12 @@ use std::sync::OnceLock;
 use ndarray::ArrayD;
 use serde_json::Value;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LossyU8Tolerance {
+    pub max_abs_delta: u8,
+    pub max_diff_pixels: usize,
+}
+
 pub fn workspace_root(manifest_dir: &str) -> PathBuf {
     Path::new(manifest_dir)
         .join("..")
@@ -212,4 +218,18 @@ pub fn assert_u8_bytes_close(
         diff_count <= max_diff_pixels,
         "{context}: differing pixels {diff_count} exceeded {max_diff_pixels}; first diffs: {first_diffs:?}"
     );
+}
+
+pub fn fixture_lossy_u8_tolerance(path: &Path) -> Option<LossyU8Tolerance> {
+    let path_str = path.to_string_lossy();
+    if path_str.ends_with("byte_JPEG.tif") {
+        // Cross-library JPEG decode drift is expected. Keep the tolerance
+        // fixture-specific and bounded instead of using a broad global rule.
+        Some(LossyU8Tolerance {
+            max_abs_delta: 1,
+            max_diff_pixels: 16,
+        })
+    } else {
+        None
+    }
 }

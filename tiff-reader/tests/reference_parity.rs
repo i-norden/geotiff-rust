@@ -191,10 +191,15 @@ fn assert_gdal_u8_pixels_close(path: &std::path::Path, ifd_index: usize) {
     let (actual, offset) = raster.into_raw_vec_and_offset();
     assert_eq!(offset, Some(0), "unexpected array offset for {path_str}");
 
-    // JPEG stays on a bounded-delta comparison because `jpeg-decoder` differs
-    // from GDAL/libjpeg on `byte_JPEG.tif` by 3 grayscale samples, each +1.
-    let max_diff_pixels = (expected.len() / 100).max(4);
-    reference::assert_u8_bytes_close(&actual, &expected, 1, max_diff_pixels, path_str);
+    let tolerance = reference::fixture_lossy_u8_tolerance(path)
+        .unwrap_or_else(|| panic!("missing lossy tolerance for fixture: {path_str}"));
+    reference::assert_u8_bytes_close(
+        &actual,
+        &expected,
+        tolerance.max_abs_delta,
+        tolerance.max_diff_pixels,
+        path_str,
+    );
 }
 
 fn write_generated_planar_fixture(path: &std::path::Path) {
