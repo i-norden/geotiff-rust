@@ -107,11 +107,8 @@ impl GeoKeyDirectory {
                     // Value is in GeoAsciiParams.
                     let start = value_offset as usize;
                     let end = start + count;
-                    if end <= ascii_params.len() {
-                        let s = ascii_params[start..end]
-                            .trim_end_matches('|')
-                            .trim_end_matches('\0')
-                            .to_string();
+                    if let Some(raw) = ascii_params.get(start..end) {
+                        let s = raw.trim_end_matches('|').trim_end_matches('\0').to_string();
                         GeoKeyValue::Ascii(s)
                     } else {
                         continue;
@@ -262,5 +259,23 @@ mod tests {
         dir.set(GT_MODEL_TYPE, GeoKeyValue::Short(1));
         dir.remove(GT_MODEL_TYPE);
         assert!(dir.get(GT_MODEL_TYPE).is_none());
+    }
+
+    #[test]
+    fn parse_skips_invalid_ascii_subslice_without_panicking() {
+        let directory = [
+            1u16,
+            1,
+            0,
+            1, // header
+            GEOG_CITATION,
+            34737,
+            1,
+            1, // byte offsets that are invalid for lossy UTF-8
+        ];
+        let ascii = String::from_utf8_lossy(&[0xff, b'|']).into_owned();
+
+        let parsed = GeoKeyDirectory::parse(&directory, &[], &ascii).unwrap();
+        assert!(parsed.get_ascii(GEOG_CITATION).is_none());
     }
 }

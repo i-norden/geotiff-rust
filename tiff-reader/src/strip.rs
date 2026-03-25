@@ -134,7 +134,13 @@ fn collect_strip_specs(ifd: &Ifd, layout: &RasterLayout) -> Result<Vec<StripBloc
         )));
     }
 
-    let rows_per_strip = ifd.rows_per_strip().unwrap_or(ifd.height()) as usize;
+    let rows_per_strip = ifd.rows_per_strip().unwrap_or(ifd.height());
+    if rows_per_strip == 0 {
+        return Err(Error::InvalidImageLayout(
+            "RowsPerStrip must be greater than zero".into(),
+        ));
+    }
+    let rows_per_strip = rows_per_strip as usize;
     let strips_per_plane = layout.height.div_ceil(rows_per_strip);
     let expected = match layout.planar_configuration {
         1 => strips_per_plane,
@@ -245,7 +251,6 @@ fn read_strip_block(
     let jpeg_tables = ifd
         .tag(TAG_JPEG_TABLES)
         .and_then(|tag| tag.value.as_bytes());
-    let mut decoded = filters::decompress(ifd.compression(), &compressed, spec.index, jpeg_tables)?;
     let samples = if layout.planar_configuration == 1 {
         layout.samples_per_pixel
     } else {
@@ -256,6 +261,13 @@ fn read_strip_block(
         .rows_in_strip
         .checked_mul(expected_row_bytes)
         .ok_or_else(|| Error::InvalidImageLayout("strip size overflows usize".into()))?;
+    let mut decoded = filters::decompress(
+        ifd.compression(),
+        &compressed,
+        spec.index,
+        jpeg_tables,
+        expected_len,
+    )?;
     if decoded.len() < expected_len {
         return Err(Error::DecompressionFailed {
             index: spec.index,

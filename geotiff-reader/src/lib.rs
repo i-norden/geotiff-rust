@@ -482,6 +482,20 @@ mod tests {
         }])
     }
 
+    fn overwrite_classic_inline_long_tag(bytes: &mut [u8], tag_code: u16, value: u32) {
+        let entry_count = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
+        let mut offset = 10usize;
+        for _ in 0..entry_count {
+            let code = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+            if code == tag_code {
+                bytes[offset + 8..offset + 12].copy_from_slice(&le_u32(value));
+                return;
+            }
+            offset += 12;
+        }
+        panic!("tag {tag_code} not found in classic TIFF");
+    }
+
     fn build_geotiff_with_overview() -> Vec<u8> {
         let base = TestIfdSpec {
             image_data: vec![10u8, 20, 30, 40],
@@ -599,5 +613,17 @@ mod tests {
         let (values, offset) = window.into_raw_vec_and_offset();
         assert_eq!(offset, Some(0));
         assert_eq!(values, vec![99]);
+    }
+
+    #[test]
+    fn rejects_zero_rows_per_strip_without_panicking() {
+        let mut bytes = build_simple_geotiff(false);
+        overwrite_classic_inline_long_tag(&mut bytes, 278, 0);
+
+        let file = GeoTiffFile::from_bytes(bytes).unwrap();
+        assert_eq!(file.epsg(), Some(4326));
+
+        let error = file.tiff().read_image_bytes(0).unwrap_err();
+        assert!(error.to_string().contains("RowsPerStrip"));
     }
 }

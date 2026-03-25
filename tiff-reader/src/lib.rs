@@ -894,4 +894,12 @@ mod tests {
             .unwrap();
         assert_eq!(unwrapped, payload);
     }
+
+    #[test]
+    fn rejects_zero_rows_per_strip_without_panicking() {
+        let data = build_stripped_tiff(2, 2, &[1, 2, 3, 4], &[(278, 4, 1, le_u32(0).to_vec())]);
+        let file = TiffFile::from_bytes(data).unwrap();
+        let error = file.read_image_bytes(0).unwrap_err();
+        assert!(error.to_string().contains("RowsPerStrip"));
+    }
 }

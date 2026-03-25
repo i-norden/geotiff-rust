@@ -1,5 +1,11 @@
+use std::fs::File;
+use std::io::BufWriter;
+
 use ndarray::ArrayD;
+use tempfile::NamedTempFile;
+use tiff_core::{Compression, PhotometricInterpretation, PlanarConfiguration};
 use tiff_reader::TiffFile;
+use tiff_writer::{ImageBuilder, TiffWriter, WriteOptions};
 
 #[path = "../../test-support/reference.rs"]
 mod reference;
@@ -11,6 +17,7 @@ struct DirectoryExpectation {
     bits_per_sample: Vec<u16>,
     compression: u16,
     samples_per_pixel: u16,
+    planar_configuration: u16,
     sample_format: Vec<u16>,
     rows_per_strip: Option<u32>,
     tile_width: Option<u32>,
@@ -63,6 +70,8 @@ fn parse_tiffdump(output: &str) -> TiffDumpExpectation {
             directory.compression = parse_scalar_u16(line);
         } else if line.starts_with("SamplesPerPixel ") {
             directory.samples_per_pixel = parse_scalar_u16(line);
+        } else if line.starts_with("PlanarConfiguration ") || line.starts_with("PlanarConfig ") {
+            directory.planar_configuration = parse_scalar_u16(line);
         } else if line.starts_with("SampleFormat ") {
             directory.sample_format = parse_u16_list(line);
         } else if line.starts_with("RowsPerStrip ") {
@@ -182,10 +191,48 @@ fn assert_gdal_u8_pixels_close(path: &std::path::Path, ifd_index: usize) {
     let (actual, offset) = raster.into_raw_vec_and_offset();
     assert_eq!(offset, Some(0), "unexpected array offset for {path_str}");
 
-    // JPEG stays on a bounded-delta comparison because `jpeg-decoder` differs
-    // from GDAL/libjpeg on `byte_JPEG.tif` by 3 grayscale samples, each +1.
-    let max_diff_pixels = (expected.len() / 100).max(4);
-    reference::assert_u8_bytes_close(&actual, &expected, 1, max_diff_pixels, path_str);
+    let tolerance = reference::fixture_lossy_u8_tolerance(path)
+        .unwrap_or_else(|| panic!("missing lossy tolerance for fixture: {path_str}"));
+    reference::assert_u8_bytes_close(
+        &actual,
+        &expected,
+        tolerance.max_abs_delta,
+        tolerance.max_diff_pixels,
+        path_str,
+    );
+}
+
+fn write_generated_planar_fixture(path: &std::path::Path) {
+    let width = 16u32;
+    let height = 16u32;
+    let tile = 16u32;
+
+    let file = File::create(path).unwrap();
+    let writer = BufWriter::new(file);
+    let mut tiff_writer = TiffWriter::new(writer, WriteOptions::default()).unwrap();
+    let image = ImageBuilder::new(width, height)
+        .sample_type::<u8>()
+        .samples_per_pixel(3)
+        .photometric(PhotometricInterpretation::Rgb)
+        .planar_configuration(PlanarConfiguration::Planar)
+        .compression(Compression::Deflate)
+        .tiles(tile, tile);
+    let handle = tiff_writer.add_image(image).unwrap();
+
+    for band in 0..3u8 {
+        let mut plane = vec![0u8; (tile * tile) as usize];
+        for row in 0..height as usize {
+            for col in 0..width as usize {
+                plane[row * tile as usize + col] =
+                    ((row * 11 + col * 7 + band as usize * 23) % 251) as u8;
+            }
+        }
+        tiff_writer
+            .write_block(&handle, band as usize, &plane)
+            .unwrap();
+    }
+
+    tiff_writer.finish().unwrap();
 }
 
 #[test]
@@ -240,6 +287,11 @@ fn matches_libtiff_directory_layout_for_interoperability_corpus() {
                 "{relative_path} ifd {index}"
             );
             assert_eq!(
+                ifd.planar_configuration(),
+                directory.planar_configuration.max(1),
+                "{relative_path} ifd {index}"
+            );
+            assert_eq!(
                 ifd.sample_format(),
                 directory.sample_format,
                 "{relative_path} ifd {index}"
@@ -266,6 +318,37 @@ fn matches_libtiff_directory_layout_for_interoperability_corpus() {
             );
         }
     }
+}
+
+#[test]
+fn matches_reference_tools_for_generated_planar_tiff() {
+    if !reference::tiffdump_available() {
+        eprintln!("skipping libtiff planar parity test because `tiffdump` is unavailable");
+        return;
+    }
+    if !reference::python_gdal_available() {
+        eprintln!("skipping GDAL planar parity test because Python GDAL bindings are unavailable");
+        return;
+    }
+
+    let fixture = NamedTempFile::new().unwrap();
+    write_generated_planar_fixture(fixture.path());
+
+    let expected = parse_tiffdump(&reference::run_tiffdump(fixture.path()));
+    let file = TiffFile::open(fixture.path()).unwrap();
+    assert_eq!(file.ifd_count(), 1);
+
+    let directory = &expected.directories[0];
+    let ifd = file.ifd(0).unwrap();
+    assert_eq!(ifd.width(), directory.width);
+    assert_eq!(ifd.height(), directory.height);
+    assert_eq!(ifd.samples_per_pixel(), directory.samples_per_pixel);
+    assert_eq!(ifd.planar_configuration(), 2);
+    assert_eq!(directory.planar_configuration, 2);
+    assert_eq!(ifd.tile_width(), directory.tile_width);
+    assert_eq!(ifd.tile_height(), directory.tile_height);
+
+    assert_gdal_hash_matches(fixture.path(), 0, SampleKind::U8);
 }
 
 #[test]
