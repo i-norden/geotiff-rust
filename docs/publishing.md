@@ -30,7 +30,7 @@ cargo publish -p <crate>
 
 Cargo verifies package tarballs using registry dependencies rather than local
 path dependencies, so dependent crates cannot complete a full `cargo package`
-verification until their internal `0.4.0` dependencies are available on
+verification until their internal `0.5.0` dependencies are available on
 crates.io.
 
 Before those internal versions are live, you can still locally verify the
