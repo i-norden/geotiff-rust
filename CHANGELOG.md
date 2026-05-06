@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0
+
+- Add storage-domain single-band read APIs to `tiff-reader` and `geotiff-reader`, including full-image and windowed reads that return `[rows, cols]` arrays.
+- Optimize separate-planar band reads so the reader only decodes the requested band plane instead of every plane.
+- Fix `block_cache_slots = 0` and HTTP `cache_slots = 0` so zero slots consistently disables cache storage.
+- Add coverage for chunky and separate-planar band reads, GeoTIFF band windows, and disabled zero-slot range caches.
+
 ## 0.4.0
 
 - Add JPEG-in-TIFF write support across `tiff-writer`, `geotiff-writer`, and COG output using standard compression code `7`.
