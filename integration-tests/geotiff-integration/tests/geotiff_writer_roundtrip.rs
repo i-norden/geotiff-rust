@@ -1,10 +1,11 @@
 use std::io::Cursor;
 
+use geotiff_core::tags::{TAG_MODEL_PIXEL_SCALE, TAG_MODEL_TIEPOINT};
 use geotiff_reader::GeoTiffFile;
 use geotiff_writer::{
     ColorMap, ColorModel, Compression, CrsKind, Error as GeoTiffWriteError, ExtraSample,
-    GeoTiffBuilder, InkSet, JpegOptions, LercAdditionalCompression, LercOptions, ModelType,
-    PlanarConfiguration, TiffVariant,
+    GeoTiffBuilder, GeoTransform, InkSet, JpegOptions, LercAdditionalCompression, LercOptions,
+    ModelType, PlanarConfiguration, RasterType, TiffVariant,
 };
 use ndarray::{Array2, Array3};
 use tiff_reader::TiffFile;
@@ -80,6 +81,71 @@ fn geotiff_roundtrips_pixels_metadata_and_transform() {
     let (x, y) = transform.pixel_to_geo(0.0, 0.0);
     assert!((x - 100.0).abs() < 1e-10);
     assert!((y - 200.0).abs() < 1e-10);
+}
+
+#[test]
+fn pixel_is_point_transform_serialization_roundtrips_without_half_pixel_shift() {
+    let data = Array2::<u8>::from_elem((2, 2), 1);
+    let transform = GeoTransform::from_origin_and_pixel_size(100.0, 200.0, 10.0, -10.0);
+    let cases = [
+        (
+            "raster type before transform",
+            GeoTiffBuilder::new(2, 2)
+                .raster_type(RasterType::PixelIsPoint)
+                .transform(transform),
+        ),
+        (
+            "raster type after transform",
+            GeoTiffBuilder::new(2, 2)
+                .transform(transform)
+                .raster_type(RasterType::PixelIsPoint),
+        ),
+        (
+            "origin and pixel scale",
+            GeoTiffBuilder::new(2, 2)
+                .origin(100.0, 200.0)
+                .pixel_scale(10.0, 10.0)
+                .raster_type(RasterType::PixelIsPoint),
+        ),
+    ];
+
+    for (label, builder) in cases {
+        let mut buf = Cursor::new(Vec::new());
+        builder.write_2d_to(&mut buf, data.view()).unwrap();
+        let bytes = buf.into_inner();
+
+        let tiff = TiffFile::from_bytes(bytes.clone()).unwrap();
+        let ifd = tiff.ifd(0).unwrap();
+        let scale = ifd
+            .tag(TAG_MODEL_PIXEL_SCALE)
+            .and_then(|tag| tag.value.as_f64_vec())
+            .unwrap();
+        let tiepoint = ifd
+            .tag(TAG_MODEL_TIEPOINT)
+            .and_then(|tag| tag.value.as_f64_vec())
+            .unwrap();
+        assert_eq!(scale, vec![10.0, 10.0, 0.0], "{label}");
+        assert_eq!(tiepoint, vec![0.0, 0.0, 0.0, 105.0, 195.0, 0.0], "{label}");
+
+        let geo = GeoTiffFile::from_bytes(bytes).unwrap();
+        let roundtrip = geo.transform().unwrap();
+        assert!(
+            (roundtrip.origin_x - transform.origin_x).abs() < 1e-10,
+            "{label}"
+        );
+        assert!(
+            (roundtrip.origin_y - transform.origin_y).abs() < 1e-10,
+            "{label}"
+        );
+        assert!(
+            (roundtrip.pixel_width - transform.pixel_width).abs() < 1e-10,
+            "{label}"
+        );
+        assert!(
+            (roundtrip.pixel_height - transform.pixel_height).abs() < 1e-10,
+            "{label}"
+        );
+    }
 }
 
 #[test]
