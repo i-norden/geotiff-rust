@@ -25,7 +25,7 @@ pub mod sample;
 pub mod tile_writer;
 
 pub use builder::GeoTiffBuilder;
-pub use cog::{CogBuilder, CogTileWriter, Resampling};
+pub use cog::{CogBuilder, CogTileWriter, OverviewStorage, Resampling};
 pub use error::{Error, Result};
 pub use sample::{NumericSample, WriteSample};
 pub use tile_writer::StreamingTileWriter;
