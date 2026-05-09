@@ -28,6 +28,8 @@ pub struct GeoTiffBuilder {
     pub(crate) geokeys: GeoKeyDirectory,
     pub(crate) pixel_scale: Option<[f64; 3]>,
     pub(crate) tiepoint: Option<[f64; 6]>,
+    pub(crate) tiepoint_is_origin: bool,
+    pub(crate) affine_transform: Option<GeoTransform>,
     pub(crate) transformation_matrix: Option<[f64; 16]>,
     pub(crate) nodata: Option<String>,
     pub(crate) compression: Compression,
@@ -56,6 +58,8 @@ impl GeoTiffBuilder {
             geokeys: GeoKeyDirectory::new(),
             pixel_scale: None,
             tiepoint: None,
+            tiepoint_is_origin: false,
+            affine_transform: None,
             transformation_matrix: None,
             nodata: None,
             compression: Compression::None,
@@ -205,31 +209,40 @@ impl GeoTiffBuilder {
     /// Set pixel scale (X, Y).
     pub fn pixel_scale(mut self, scale_x: f64, scale_y: f64) -> Self {
         self.pixel_scale = Some([scale_x, scale_y, 0.0]);
+        self.affine_transform = None;
         self
     }
 
     /// Set the map origin (upper-left corner X, Y).
     pub fn origin(mut self, x: f64, y: f64) -> Self {
         self.tiepoint = Some([0.0, 0.0, 0.0, x, y, 0.0]);
+        self.tiepoint_is_origin = true;
+        self.affine_transform = None;
         self
     }
 
     /// Set an explicit tiepoint (I, J, K, X, Y, Z).
     pub fn tiepoint(mut self, tiepoint: [f64; 6]) -> Self {
         self.tiepoint = Some(tiepoint);
+        self.tiepoint_is_origin = false;
+        self.affine_transform = None;
         self
     }
 
     /// Set a full affine transform. Takes precedence over pixel_scale + origin.
     pub fn transform(mut self, transform: GeoTransform) -> Self {
-        if let Some((tp, scale)) = transform.to_tiepoint_and_scale() {
-            self.tiepoint = Some(tp);
-            self.pixel_scale = Some(scale);
+        if transform.to_tiepoint_and_scale().is_some() {
+            self.affine_transform = Some(transform);
+            self.tiepoint = None;
+            self.pixel_scale = None;
+            self.tiepoint_is_origin = false;
             self.transformation_matrix = None;
         } else {
             self.transformation_matrix = Some(transform.to_transformation_matrix());
+            self.affine_transform = None;
             self.tiepoint = None;
             self.pixel_scale = None;
+            self.tiepoint_is_origin = false;
         }
         self
     }
@@ -237,8 +250,10 @@ impl GeoTiffBuilder {
     /// Set a 4x4 model transformation matrix.
     pub fn transformation_matrix(mut self, matrix: [f64; 16]) -> Self {
         self.transformation_matrix = Some(matrix);
+        self.affine_transform = None;
         self.tiepoint = None;
         self.pixel_scale = None;
+        self.tiepoint_is_origin = false;
         self
     }
 
@@ -364,6 +379,19 @@ impl GeoTiffBuilder {
                 tags::TAG_MODEL_TRANSFORMATION,
                 TagValue::Double(matrix.to_vec()),
             ));
+        } else if let Some(transform) = self.affine_transform {
+            if let Some((tp, ps)) =
+                transform.to_tiepoint_and_scale_with_raster_type(self.current_raster_type())
+            {
+                extra.push(Tag::new(
+                    tags::TAG_MODEL_PIXEL_SCALE,
+                    TagValue::Double(ps.to_vec()),
+                ));
+                extra.push(Tag::new(
+                    tags::TAG_MODEL_TIEPOINT,
+                    TagValue::Double(tp.to_vec()),
+                ));
+            }
         } else {
             if let Some(ps) = &self.pixel_scale {
                 extra.push(Tag::new(
@@ -372,9 +400,14 @@ impl GeoTiffBuilder {
                 ));
             }
             if let Some(tp) = &self.tiepoint {
+                let tiepoint = if self.tiepoint_is_origin {
+                    self.origin_tiepoint_for_raster_type(tp)
+                } else {
+                    *tp
+                };
                 extra.push(Tag::new(
                     tags::TAG_MODEL_TIEPOINT,
-                    TagValue::Double(tp.to_vec()),
+                    TagValue::Double(tiepoint.to_vec()),
                 ));
             }
         }
@@ -406,6 +439,29 @@ impl GeoTiffBuilder {
         }
 
         extra
+    }
+
+    fn current_raster_type(&self) -> RasterType {
+        self.geokeys
+            .get_short(geokeys::GT_RASTER_TYPE)
+            .map(RasterType::from_code)
+            .unwrap_or(RasterType::PixelIsArea)
+    }
+
+    fn origin_tiepoint_for_raster_type(&self, tiepoint: &[f64; 6]) -> [f64; 6] {
+        let Some(pixel_scale) = self.pixel_scale else {
+            return *tiepoint;
+        };
+        let transform = GeoTransform::from_origin_and_pixel_size(
+            tiepoint[3],
+            tiepoint[4],
+            pixel_scale[0],
+            -pixel_scale[1],
+        );
+        transform
+            .to_tiepoint_and_scale_with_raster_type(self.current_raster_type())
+            .map(|(tiepoint, _)| tiepoint)
+            .unwrap_or(*tiepoint)
     }
 
     /// Build an ImageBuilder from this GeoTiffBuilder for a given sample type.

@@ -132,12 +132,41 @@ impl GeoTransform {
 
     /// Serialize to a tiepoint + pixel_scale pair (for north-up, no-skew images).
     /// Returns `None` if there is skew (use `to_transformation_matrix` instead).
+    ///
+    /// This uses PixelIsArea semantics. Use
+    /// [`Self::to_tiepoint_and_scale_with_raster_type`] when writing a GeoTIFF
+    /// with an explicit raster type.
     pub fn to_tiepoint_and_scale(&self) -> Option<([f64; 6], [f64; 3])> {
+        self.to_tiepoint_and_scale_with_raster_type(RasterType::PixelIsArea)
+    }
+
+    /// Serialize to a tiepoint + pixel_scale pair using the GeoTIFF raster type.
+    ///
+    /// The transform is stored internally as a corner-based affine transform.
+    /// PixelIsPoint tiepoints, however, refer to pixel centers, so the emitted
+    /// tiepoint is shifted by half a pixel to roundtrip through
+    /// [`Self::from_tiepoint_and_scale_with_raster_type`] without changing the
+    /// normalized transform.
+    pub fn to_tiepoint_and_scale_with_raster_type(
+        &self,
+        raster_type: RasterType,
+    ) -> Option<([f64; 6], [f64; 3])> {
         if self.skew_x.abs() > 1e-15 || self.skew_y.abs() > 1e-15 {
             return None;
         }
-        let tiepoint = [0.0, 0.0, 0.0, self.origin_x, self.origin_y, 0.0];
         let scale = [self.pixel_width, -self.pixel_height, 0.0];
+        let pixel_offset = match raster_type {
+            RasterType::PixelIsPoint => 0.5,
+            RasterType::PixelIsArea | RasterType::Unknown(_) => 0.0,
+        };
+        let tiepoint = [
+            0.0,
+            0.0,
+            0.0,
+            self.origin_x + pixel_offset * scale[0],
+            self.origin_y - pixel_offset * scale[1],
+            0.0,
+        ];
         Some((tiepoint, scale))
     }
 
@@ -224,6 +253,26 @@ mod tests {
         let gt = GeoTransform::from_origin_and_pixel_size(-180.0, 90.0, 0.1, -0.1);
         let (tp, scale) = gt.to_tiepoint_and_scale().unwrap();
         let gt2 = GeoTransform::from_tiepoint_and_scale(&tp, &scale);
+        assert!((gt2.origin_x - gt.origin_x).abs() < 1e-10);
+        assert!((gt2.origin_y - gt.origin_y).abs() < 1e-10);
+        assert!((gt2.pixel_width - gt.pixel_width).abs() < 1e-10);
+        assert!((gt2.pixel_height - gt.pixel_height).abs() < 1e-10);
+    }
+
+    #[test]
+    fn pixel_is_point_tiepoint_and_scale_roundtrips_normalized_transform() {
+        let gt = GeoTransform::from_origin_and_pixel_size(99.0, 201.0, 2.0, -2.0);
+        let (tp, scale) = gt
+            .to_tiepoint_and_scale_with_raster_type(RasterType::PixelIsPoint)
+            .unwrap();
+        assert!((tp[3] - 100.0).abs() < 1e-10);
+        assert!((tp[4] - 200.0).abs() < 1e-10);
+
+        let gt2 = GeoTransform::from_tiepoint_and_scale_with_raster_type(
+            &tp,
+            &scale,
+            RasterType::PixelIsPoint,
+        );
         assert!((gt2.origin_x - gt.origin_x).abs() < 1e-10);
         assert!((gt2.origin_y - gt.origin_y).abs() < 1e-10);
         assert!((gt2.pixel_width - gt.pixel_width).abs() < 1e-10);
