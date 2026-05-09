@@ -1,5 +1,9 @@
 use std::io::Cursor;
 
+use geotiff_core::tags::{
+    TAG_GDAL_NODATA, TAG_GEO_ASCII_PARAMS, TAG_GEO_DOUBLE_PARAMS, TAG_GEO_KEY_DIRECTORY,
+    TAG_MODEL_PIXEL_SCALE, TAG_MODEL_TIEPOINT, TAG_MODEL_TRANSFORMATION,
+};
 use geotiff_reader::GeoTiffFile;
 use geotiff_writer::{
     CogBuilder, Compression, Error as GeoTiffWriteError, GeoTiffBuilder, JpegOptions,
@@ -65,6 +69,13 @@ fn assert_u8_bytes_close(
     );
 }
 
+fn assert_no_duplicate_tags(ifd: &tiff_reader::Ifd, tags: &[u16], context: &str) {
+    for &tag in tags {
+        let count = ifd.tags().iter().filter(|entry| entry.code == tag).count();
+        assert!(count <= 1, "{context}: tag {tag} appears {count} times");
+    }
+}
+
 #[test]
 fn cog_layout_and_overview_discovery_roundtrip() {
     let data = Array2::<u8>::from_elem((64, 64), 42);
@@ -84,6 +95,18 @@ fn cog_layout_and_overview_discovery_roundtrip() {
     let tiff = TiffFile::from_bytes(bytes.clone()).unwrap();
     assert_eq!(tiff.ifd(0).unwrap().width(), 64);
     assert!(tiff.ifd_count() >= 3);
+    let geotiff_tags = [
+        TAG_MODEL_PIXEL_SCALE,
+        TAG_MODEL_TIEPOINT,
+        TAG_MODEL_TRANSFORMATION,
+        TAG_GEO_KEY_DIRECTORY,
+        TAG_GEO_DOUBLE_PARAMS,
+        TAG_GEO_ASCII_PARAMS,
+        TAG_GDAL_NODATA,
+    ];
+    for index in 1..tiff.ifd_count() {
+        assert_no_duplicate_tags(tiff.ifd(index).unwrap(), &geotiff_tags, "COG overview IFD");
+    }
     assert_eq!(
         &bytes[8..8 + gdal_structural_metadata_bytes(PlanarConfiguration::Chunky).len()],
         gdal_structural_metadata_bytes(PlanarConfiguration::Chunky).as_slice()

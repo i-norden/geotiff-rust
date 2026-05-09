@@ -690,10 +690,6 @@ impl CogBuilder {
             builder = builder.jpeg_options(opts);
         }
 
-        for tag in self.inner.build_extra_tags() {
-            builder = builder.tag(tag);
-        }
-
         builder
     }
 
