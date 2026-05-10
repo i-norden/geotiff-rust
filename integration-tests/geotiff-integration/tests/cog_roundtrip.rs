@@ -4,10 +4,10 @@ use geotiff_core::tags::{
     TAG_GDAL_NODATA, TAG_GEO_ASCII_PARAMS, TAG_GEO_DOUBLE_PARAMS, TAG_GEO_KEY_DIRECTORY,
     TAG_MODEL_PIXEL_SCALE, TAG_MODEL_TIEPOINT, TAG_MODEL_TRANSFORMATION,
 };
-use geotiff_reader::GeoTiffFile;
+use geotiff_reader::{Error as GeoTiffReadError, GeoTiffFile};
 use geotiff_writer::{
     CogBuilder, Compression, Error as GeoTiffWriteError, GeoTiffBuilder, JpegOptions,
-    PhotometricInterpretation, PlanarConfiguration, Resampling, TiffVariant,
+    OverviewStorage, PhotometricInterpretation, PlanarConfiguration, Resampling, TiffVariant,
 };
 use ndarray::{Array2, Array3};
 use tiff_reader::TiffFile;
@@ -117,6 +117,40 @@ fn cog_layout_and_overview_discovery_roundtrip() {
     assert_eq!(geo.base_ifd_index(), 0);
     assert_eq!(geo.overview_count(), 2);
     assert_eq!(geo.read_raster::<u8>().unwrap().shape(), &[64, 64]);
+    assert_eq!(geo.read_overview::<u8>(0).unwrap().shape(), &[32, 32]);
+    assert_eq!(geo.read_overview::<u8>(1).unwrap().shape(), &[16, 16]);
+}
+
+#[test]
+fn cog_can_write_subifd_overviews() {
+    let data = Array2::<u8>::from_elem((64, 64), 7);
+    let mut buf = Cursor::new(Vec::new());
+    let builder = GeoTiffBuilder::new(64, 64)
+        .tile_size(32, 32)
+        .epsg(4326)
+        .pixel_scale(1.0, 1.0)
+        .origin(0.0, 64.0);
+
+    CogBuilder::new(builder)
+        .overview_levels(vec![2, 4])
+        .overview_storage(OverviewStorage::SubIfds)
+        .write_2d_to(&mut buf, data.view())
+        .unwrap();
+
+    let bytes = buf.into_inner();
+    let tiff = TiffFile::from_bytes(bytes.clone()).unwrap();
+    assert_eq!(tiff.ifd_count(), 1);
+    let sub_ifd_offsets = tiff.ifd(0).unwrap().sub_ifd_offsets().unwrap();
+    assert_eq!(sub_ifd_offsets.len(), 2);
+    assert!(sub_ifd_offsets.iter().all(|&offset| offset > 0));
+
+    let geo = GeoTiffFile::from_bytes(bytes).unwrap();
+    assert_eq!(geo.base_ifd_index(), 0);
+    assert_eq!(geo.overview_count(), 2);
+    assert!(matches!(
+        geo.overview_ifd_index(0),
+        Err(GeoTiffReadError::OverviewHasNoTopLevelIfdIndex(0))
+    ));
     assert_eq!(geo.read_overview::<u8>(0).unwrap().shape(), &[32, 32]);
     assert_eq!(geo.read_overview::<u8>(1).unwrap().shape(), &[16, 16]);
 }

@@ -372,6 +372,10 @@ impl GeoTiffBuilder {
     /// Build the GeoTIFF extra tags from the current metadata.
     pub(crate) fn build_extra_tags(&self) -> Vec<Tag> {
         let mut extra = Vec::new();
+        let writes_georeferencing = self.transformation_matrix.is_some()
+            || self.affine_transform.is_some()
+            || self.pixel_scale.is_some()
+            || self.tiepoint.is_some();
 
         // Georeferencing tags
         if let Some(matrix) = &self.transformation_matrix {
@@ -413,7 +417,7 @@ impl GeoTiffBuilder {
         }
 
         // GeoKey directory
-        if !self.geokeys.keys.is_empty() {
+        if writes_georeferencing || !self.geokeys.keys.is_empty() {
             let (directory, double_params, ascii_params) = self.geokeys.serialize();
             extra.push(Tag::new(
                 tags::TAG_GEO_KEY_DIRECTORY,

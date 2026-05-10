@@ -4,7 +4,8 @@
 //! 1. TIFF header
 //! 2. GDAL structural metadata block (the COG "ghost area")
 //! 3. Base image IFD (full resolution)
-//! 4. Overview IFDs (largest → smallest)
+//! 4. Overview IFDs (largest → smallest), either in the top-level IFD chain
+//!    or referenced by the base image's SubIFDs tag
 //! 5. Tile offset/byte-count arrays
 //! 6. Tile data: overviews (smallest first), then base image
 //!
@@ -17,7 +18,7 @@ use std::path::Path;
 
 use ndarray::{Array3, ArrayView2, ArrayView3, Axis};
 use tempfile::tempfile;
-use tiff_core::{ByteOrder, Compression, Predictor, Tag};
+use tiff_core::{ByteOrder, Compression, Predictor, Tag, TagType, TagValue, TAG_SUB_IFDS};
 use tiff_writer::{encoder, ImageBuilder, TiffVariant};
 use tiff_writer::{JpegOptions, LercOptions};
 
@@ -30,6 +31,15 @@ use crate::sample::{parse_nodata_value, NumericSample};
 pub enum Resampling {
     NearestNeighbor,
     Average,
+}
+
+/// How COG overview IFDs are referenced from the TIFF metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverviewStorage {
+    /// Write overviews as top-level IFDs chained after the base image.
+    TopLevelIfds,
+    /// Write overviews as SubIFDs referenced from the base image.
+    SubIfds,
 }
 
 fn checked_len_u64(len: usize, context: &str) -> Result<u64> {
@@ -101,6 +111,7 @@ struct CogBlockRecord {
 struct CogImage {
     builder: ImageBuilder,
     blocks: Vec<CogBlockRecord>,
+    sub_ifd_count: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -352,6 +363,7 @@ pub struct CogBuilder {
     inner: GeoTiffBuilder,
     overview_levels: Vec<u32>,
     resampling: Resampling,
+    overview_storage: OverviewStorage,
 }
 
 fn gdal_block_leader(payload_len: usize, byte_order: ByteOrder) -> Result<Vec<u8>> {
@@ -416,6 +428,60 @@ fn validate_overview_levels(levels: &[u32]) -> Result<Vec<u32>> {
     Ok(normalized)
 }
 
+fn sub_ifds_tag(count: usize, is_bigtiff: bool) -> Result<Tag> {
+    let count_u64 = checked_len_u64(count, "SubIFD offset count")?;
+    if is_bigtiff {
+        Ok(Tag {
+            code: TAG_SUB_IFDS,
+            tag_type: TagType::Ifd8,
+            count: count_u64,
+            value: TagValue::Long8(vec![0; count]),
+        })
+    } else {
+        Ok(Tag::new(TAG_SUB_IFDS, TagValue::Long(vec![0; count])))
+    }
+}
+
+fn build_cog_image_tags(image: &CogImage, is_bigtiff: bool) -> Result<Vec<Tag>> {
+    let mut tags = image.builder.build_tags(is_bigtiff);
+    if image.sub_ifd_count > 0 {
+        tags.push(sub_ifds_tag(image.sub_ifd_count, is_bigtiff)?);
+        tags.sort_by_key(|tag| tag.code);
+    }
+    Ok(tags)
+}
+
+fn tag_value_storage_offset(
+    ifd_offset: u64,
+    is_bigtiff: bool,
+    tags: &[Tag],
+    target_code: u16,
+) -> Option<u64> {
+    let entry_size: u64 = if is_bigtiff { 20 } else { 12 };
+    let inline_max: usize = if is_bigtiff { 8 } else { 4 };
+    let next_ptr_size: u64 = if is_bigtiff { 8 } else { 4 };
+    let count_size: u64 = if is_bigtiff { 8 } else { 2 };
+    let value_field_offset: u64 = if is_bigtiff { 12 } else { 8 };
+    let mut deferred_offset =
+        ifd_offset + count_size + tags.len() as u64 * entry_size + next_ptr_size;
+
+    for (index, tag) in tags.iter().enumerate() {
+        let encoded_len = tag.value.encode(ByteOrder::LittleEndian).len();
+        if tag.code == target_code {
+            return if encoded_len <= inline_max {
+                Some(ifd_offset + count_size + index as u64 * entry_size + value_field_offset)
+            } else {
+                Some(deferred_offset)
+            };
+        }
+        if encoded_len > inline_max {
+            deferred_offset += encoded_len as u64;
+        }
+    }
+
+    None
+}
+
 fn plan_cog_layout_for_variant(
     base_offset: u64,
     prefix_len: u64,
@@ -441,7 +507,7 @@ fn plan_cog_layout_for_variant(
                 image.blocks.len()
             )));
         }
-        let tags = image.builder.build_tags(is_bigtiff);
+        let tags = build_cog_image_tags(image, is_bigtiff)?;
         current = checked_add_u64(
             current,
             encoder::estimate_ifd_size(ByteOrder::LittleEndian, is_bigtiff, &tags),
@@ -607,22 +673,55 @@ fn emit_cog<W: Write + Seek>(
                 )?;
             }
         }
+    }
 
-        if index == 0 {
-            encoder::patch_first_ifd(
-                sink,
-                layout.base_offset,
-                ByteOrder::LittleEndian,
-                layout.is_bigtiff,
-                ifd_result.ifd_offset,
-            )?;
-        } else {
+    let first_ifd = ifd_results
+        .first()
+        .ok_or_else(|| Error::Other("COG layout contains no images".into()))?;
+    encoder::patch_first_ifd(
+        sink,
+        layout.base_offset,
+        ByteOrder::LittleEndian,
+        layout.is_bigtiff,
+        first_ifd.ifd_offset,
+    )?;
+
+    let sub_ifd_count = images.first().map(|image| image.sub_ifd_count).unwrap_or(0);
+    if sub_ifd_count > 0 {
+        let sub_ifd_offsets: Vec<u64> = ifd_results
+            .iter()
+            .skip(1)
+            .take(sub_ifd_count)
+            .map(|result| result.ifd_offset)
+            .collect();
+        if sub_ifd_offsets.len() != sub_ifd_count {
+            return Err(Error::Other(format!(
+                "COG SubIFD layout expected {sub_ifd_count} overview IFDs, found {}",
+                sub_ifd_offsets.len()
+            )));
+        }
+        let sub_ifd_data_offset = tag_value_storage_offset(
+            first_ifd.ifd_offset,
+            layout.is_bigtiff,
+            &layout.images[0].tags,
+            TAG_SUB_IFDS,
+        )
+        .ok_or_else(|| Error::Other("COG base IFD is missing SubIFDs tag".into()))?;
+        encoder::patch_block_offsets(
+            sink,
+            ByteOrder::LittleEndian,
+            layout.is_bigtiff,
+            sub_ifd_data_offset,
+            &sub_ifd_offsets,
+        )?;
+    } else {
+        for index in 1..ifd_results.len() {
             encoder::patch_next_ifd(
                 sink,
                 ByteOrder::LittleEndian,
                 layout.is_bigtiff,
                 ifd_results[index - 1].next_ifd_pointer_offset,
-                ifd_result.ifd_offset,
+                ifd_results[index].ifd_offset,
             )?;
         }
     }
@@ -643,6 +742,7 @@ impl CogBuilder {
             inner: builder,
             overview_levels: vec![2, 4, 8],
             resampling: Resampling::NearestNeighbor,
+            overview_storage: OverviewStorage::TopLevelIfds,
         }
     }
 
@@ -661,6 +761,18 @@ impl CogBuilder {
     /// Set resampling algorithm for overview generation.
     pub fn resampling(mut self, resampling: Resampling) -> Self {
         self.resampling = resampling;
+        self
+    }
+
+    /// Select how overview IFDs are referenced.
+    pub fn overview_storage(mut self, storage: OverviewStorage) -> Self {
+        self.overview_storage = storage;
+        self
+    }
+
+    /// Store overviews as SubIFDs of the base image.
+    pub fn subifd_overviews(mut self) -> Self {
+        self.overview_storage = OverviewStorage::SubIfds;
         self
     }
 
@@ -717,11 +829,17 @@ impl CogBuilder {
         images.push(CogImage {
             builder: self.inner.to_image_builder::<T>(),
             blocks: Vec::new(),
+            sub_ifd_count: if matches!(self.overview_storage, OverviewStorage::SubIfds) {
+                overview_levels.len()
+            } else {
+                0
+            },
         });
         for &level in overview_levels {
             images.push(CogImage {
                 builder: self.overview_image_builder::<T>(level, tile_width, tile_height),
                 blocks: Vec::new(),
+                sub_ifd_count: 0,
             });
         }
         images
@@ -1603,6 +1721,7 @@ mod tests {
                 logical_offset_delta: 4,
                 logical_byte_count: 1,
             }],
+            sub_ifd_count: 0,
         }];
 
         let layout = plan_cog_layout(

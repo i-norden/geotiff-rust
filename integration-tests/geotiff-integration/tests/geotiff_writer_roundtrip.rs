@@ -1,6 +1,6 @@
 use std::io::Cursor;
 
-use geotiff_core::tags::{TAG_MODEL_PIXEL_SCALE, TAG_MODEL_TIEPOINT};
+use geotiff_core::tags::{TAG_GEO_KEY_DIRECTORY, TAG_MODEL_PIXEL_SCALE, TAG_MODEL_TIEPOINT};
 use geotiff_reader::GeoTiffFile;
 use geotiff_writer::{
     ColorMap, ColorModel, Compression, CrsKind, Error as GeoTiffWriteError, ExtraSample,
@@ -8,7 +8,9 @@ use geotiff_writer::{
     ModelType, PlanarConfiguration, RasterType, TiffVariant,
 };
 use ndarray::{Array2, Array3};
+use tiff_core::{Tag, TagValue};
 use tiff_reader::TiffFile;
+use tiff_writer::{ImageBuilder, TiffWriter, WriteOptions};
 
 fn assert_u8_bytes_close(
     actual: &[u8],
@@ -146,6 +148,63 @@ fn pixel_is_point_transform_serialization_roundtrips_without_half_pixel_shift() 
             "{label}"
         );
     }
+}
+
+#[test]
+fn writer_emits_minimal_geokey_directory_for_transform_only_metadata() {
+    let data = Array2::<u8>::from_elem((2, 2), 3);
+    let mut buf = Cursor::new(Vec::new());
+    GeoTiffBuilder::new(2, 2)
+        .pixel_scale(10.0, 10.0)
+        .origin(100.0, 200.0)
+        .write_2d_to(&mut buf, data.view())
+        .unwrap();
+
+    let bytes = buf.into_inner();
+    let tiff = TiffFile::from_bytes(bytes.clone()).unwrap();
+    let directory = tiff
+        .ifd(0)
+        .unwrap()
+        .tag(TAG_GEO_KEY_DIRECTORY)
+        .and_then(|tag| tag.value.as_u16_slice())
+        .unwrap();
+    assert_eq!(directory, &[1, 1, 0, 0]);
+
+    let geo = GeoTiffFile::from_bytes(bytes).unwrap();
+    assert_eq!(geo.epsg(), None);
+    let transform = geo.transform().unwrap();
+    assert!((transform.origin_x - 100.0).abs() < 1e-10);
+    assert!((transform.origin_y - 200.0).abs() < 1e-10);
+}
+
+#[test]
+fn reader_accepts_model_georeferencing_without_geokey_directory() {
+    let mut buf = Cursor::new(Vec::new());
+    let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
+    let image = ImageBuilder::new(2, 2)
+        .sample_type::<u8>()
+        .tag(Tag::new(
+            TAG_MODEL_PIXEL_SCALE,
+            TagValue::Double(vec![10.0, 10.0, 0.0]),
+        ))
+        .tag(Tag::new(
+            TAG_MODEL_TIEPOINT,
+            TagValue::Double(vec![0.0, 0.0, 0.0, 100.0, 200.0, 0.0]),
+        ));
+    let handle = writer.add_image(image).unwrap();
+    writer.write_block(&handle, 0, &[1u8, 2, 3, 4]).unwrap();
+    writer.finish().unwrap();
+
+    let bytes = buf.into_inner();
+    let tiff = TiffFile::from_bytes(bytes.clone()).unwrap();
+    assert!(tiff.ifd(0).unwrap().tag(TAG_GEO_KEY_DIRECTORY).is_none());
+
+    let geo = GeoTiffFile::from_bytes(bytes).unwrap();
+    assert!(geo.geokeys().keys.is_empty());
+    assert_eq!(geo.epsg(), None);
+    let transform = geo.transform().unwrap();
+    assert!((transform.origin_x - 100.0).abs() < 1e-10);
+    assert!((transform.origin_y - 200.0).abs() < 1e-10);
 }
 
 #[test]
