@@ -1721,6 +1721,7 @@ mod tests {
                 logical_offset_delta: 4,
                 logical_byte_count: 1,
             }],
+            sub_ifd_count: 0,
         }];
 
         let layout = plan_cog_layout(
