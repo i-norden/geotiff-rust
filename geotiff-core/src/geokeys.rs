@@ -7,6 +7,9 @@
 //! GeoKeys reference values either inline (location=0), from the
 //! GeoDoubleParams tag (34736), or from the GeoAsciiParams tag (34737).
 
+use std::error::Error;
+use std::fmt;
+
 // Well-known GeoKey IDs.
 pub const GT_MODEL_TYPE: u16 = 1024;
 pub const GT_RASTER_TYPE: u16 = 1025;
@@ -28,6 +31,51 @@ pub const VERTICAL_CITATION: u16 = 4097;
 pub const VERTICAL_CS_TYPE: u16 = 4096;
 pub const VERTICAL_DATUM: u16 = 4098;
 pub const VERTICAL_UNITS: u16 = 4099;
+const GEO_DOUBLE_PARAMS_TAG: u16 = 34736;
+const GEO_ASCII_PARAMS_TAG: u16 = 34737;
+
+/// Error returned when a GeoKey directory cannot be represented in the
+/// GeoTIFF SHORT-based key directory format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeoKeySerializeError {
+    /// The GeoKey directory header stores the key count as a SHORT.
+    TooManyKeys { count: usize },
+    /// A key references more parameter values than fit in a SHORT count.
+    ValueCountTooLarge { key_id: u16, tag: u16, count: usize },
+    /// A key's parameter start offset does not fit in a SHORT value offset.
+    ParameterOffsetTooLarge {
+        key_id: u16,
+        tag: u16,
+        offset: usize,
+    },
+}
+
+impl fmt::Display for GeoKeySerializeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooManyKeys { count } => {
+                write!(
+                    f,
+                    "GeoKey directory contains {count} keys, exceeding u16::MAX"
+                )
+            }
+            Self::ValueCountTooLarge { key_id, tag, count } => write!(
+                f,
+                "GeoKey {key_id} references {count} values in tag {tag}, exceeding u16::MAX"
+            ),
+            Self::ParameterOffsetTooLarge {
+                key_id,
+                tag,
+                offset,
+            } => write!(
+                f,
+                "GeoKey {key_id} parameter offset {offset} in tag {tag} exceeds u16::MAX"
+            ),
+        }
+    }
+}
+
+impl Error for GeoKeySerializeError {}
 
 /// A parsed GeoKey entry.
 #[derive(Debug, Clone)]
@@ -183,9 +231,13 @@ impl GeoKeyDirectory {
     /// Keys are sorted by ID per spec. Short values go inline (location=0),
     /// Double values reference the double_params array (location=34736),
     /// Ascii values reference the ascii_params string (location=34737).
-    pub fn serialize(&self) -> (Vec<u16>, Vec<f64>, String) {
+    pub fn serialize(&self) -> Result<(Vec<u16>, Vec<f64>, String), GeoKeySerializeError> {
         let mut sorted_keys = self.keys.clone();
         sorted_keys.sort_by_key(|k| k.id);
+        let key_count =
+            u16::try_from(sorted_keys.len()).map_err(|_| GeoKeySerializeError::TooManyKeys {
+                count: sorted_keys.len(),
+            })?;
 
         let mut directory = Vec::new();
         let mut double_params = Vec::new();
@@ -195,7 +247,7 @@ impl GeoKeyDirectory {
         directory.push(self.version);
         directory.push(self.major_revision);
         directory.push(self.minor_revision);
-        directory.push(sorted_keys.len() as u16);
+        directory.push(key_count);
 
         for key in &sorted_keys {
             directory.push(key.id);
@@ -206,23 +258,46 @@ impl GeoKeyDirectory {
                     directory.push(*v); // value
                 }
                 GeoKeyValue::Double(v) => {
-                    directory.push(34736); // location: GeoDoubleParams
-                    directory.push(v.len() as u16);
-                    directory.push(double_params.len() as u16); // offset
+                    let count = checked_u16_len(key.id, GEO_DOUBLE_PARAMS_TAG, v.len())?;
+                    let offset =
+                        checked_u16_offset(key.id, GEO_DOUBLE_PARAMS_TAG, double_params.len())?;
+                    directory.push(GEO_DOUBLE_PARAMS_TAG); // location: GeoDoubleParams
+                    directory.push(count);
+                    directory.push(offset);
                     double_params.extend_from_slice(v);
                 }
                 GeoKeyValue::Ascii(s) => {
-                    directory.push(34737); // location: GeoAsciiParams
                     let ascii_with_pipe = format!("{}|", s);
-                    directory.push(ascii_with_pipe.len() as u16);
-                    directory.push(ascii_params.len() as u16); // offset
+                    let count =
+                        checked_u16_len(key.id, GEO_ASCII_PARAMS_TAG, ascii_with_pipe.len())?;
+                    let offset =
+                        checked_u16_offset(key.id, GEO_ASCII_PARAMS_TAG, ascii_params.len())?;
+                    directory.push(GEO_ASCII_PARAMS_TAG); // location: GeoAsciiParams
+                    directory.push(count);
+                    directory.push(offset);
                     ascii_params.push_str(&ascii_with_pipe);
                 }
             }
         }
 
-        (directory, double_params, ascii_params)
+        Ok((directory, double_params, ascii_params))
     }
+}
+
+fn checked_u16_len(key_id: u16, tag: u16, count: usize) -> Result<u16, GeoKeySerializeError> {
+    u16::try_from(count).map_err(|_| GeoKeySerializeError::ValueCountTooLarge {
+        key_id,
+        tag,
+        count,
+    })
+}
+
+fn checked_u16_offset(key_id: u16, tag: u16, offset: usize) -> Result<u16, GeoKeySerializeError> {
+    u16::try_from(offset).map_err(|_| GeoKeySerializeError::ParameterOffsetTooLarge {
+        key_id,
+        tag,
+        offset,
+    })
 }
 
 impl Default for GeoKeyDirectory {
@@ -242,7 +317,7 @@ mod tests {
         dir.set(GEOGRAPHIC_TYPE, GeoKeyValue::Short(4326));
         dir.set(GEOG_CITATION, GeoKeyValue::Ascii("WGS 84".into()));
 
-        let (shorts, doubles, ascii) = dir.serialize();
+        let (shorts, doubles, ascii) = dir.serialize().unwrap();
         let parsed = GeoKeyDirectory::parse(&shorts, &doubles, &ascii).unwrap();
 
         assert_eq!(parsed.get_short(GT_MODEL_TYPE), Some(2));
@@ -283,5 +358,64 @@ mod tests {
 
         let parsed = GeoKeyDirectory::parse(&directory, &[], &ascii).unwrap();
         assert!(parsed.get_ascii(GEOG_CITATION).is_none());
+    }
+
+    #[test]
+    fn serialize_rejects_too_many_keys() {
+        let mut dir = GeoKeyDirectory::new();
+        dir.keys = (0..=u16::MAX as usize)
+            .map(|index| GeoKey {
+                id: index as u16,
+                value: GeoKeyValue::Short(1),
+            })
+            .collect();
+
+        let err = dir.serialize().unwrap_err();
+        assert_eq!(
+            err,
+            GeoKeySerializeError::TooManyKeys {
+                count: u16::MAX as usize + 1
+            }
+        );
+    }
+
+    #[test]
+    fn serialize_rejects_oversized_double_value_count() {
+        let mut dir = GeoKeyDirectory::new();
+        dir.set(
+            GT_CITATION,
+            GeoKeyValue::Double(vec![1.0; u16::MAX as usize + 1]),
+        );
+
+        let err = dir.serialize().unwrap_err();
+        assert_eq!(
+            err,
+            GeoKeySerializeError::ValueCountTooLarge {
+                key_id: GT_CITATION,
+                tag: GEO_DOUBLE_PARAMS_TAG,
+                count: u16::MAX as usize + 1
+            }
+        );
+    }
+
+    #[test]
+    fn serialize_rejects_oversized_ascii_parameter_offset() {
+        let mut dir = GeoKeyDirectory::new();
+        dir.set(
+            GEOG_CITATION,
+            GeoKeyValue::Ascii("a".repeat(u16::MAX as usize - 1)),
+        );
+        dir.set(PROJ_CITATION, GeoKeyValue::Ascii("b".to_string()));
+        dir.set(VERTICAL_CITATION, GeoKeyValue::Ascii("c".to_string()));
+
+        let err = dir.serialize().unwrap_err();
+        assert_eq!(
+            err,
+            GeoKeySerializeError::ParameterOffsetTooLarge {
+                key_id: VERTICAL_CITATION,
+                tag: GEO_ASCII_PARAMS_TAG,
+                offset: u16::MAX as usize + 2
+            }
+        );
     }
 }

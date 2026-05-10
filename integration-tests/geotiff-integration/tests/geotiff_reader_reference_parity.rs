@@ -163,7 +163,7 @@ fn build_geo_tags() -> Vec<Tag> {
     geokeys.set(geokeys::PROJECTED_CS_TYPE, GeoKeyValue::Short(32615));
     geokeys.set(geokeys::PROJ_LINEAR_UNITS, GeoKeyValue::Short(9001));
 
-    let (directory, double_params, ascii_params) = geokeys.serialize();
+    let (directory, double_params, ascii_params) = geokeys.serialize().unwrap();
     let mut tags_out = vec![
         Tag::new(
             tags::TAG_MODEL_PIXEL_SCALE,

@@ -10,6 +10,6 @@ pub mod tags;
 pub mod transform;
 
 pub use crs::{CrsInfo, CrsKind, HorizontalCrs, ModelType, RasterType, VerticalCrs};
-pub use geokeys::{GeoKey, GeoKeyDirectory, GeoKeyValue};
+pub use geokeys::{GeoKey, GeoKeyDirectory, GeoKeySerializeError, GeoKeyValue};
 pub use metadata::GeoMetadata;
 pub use transform::GeoTransform;

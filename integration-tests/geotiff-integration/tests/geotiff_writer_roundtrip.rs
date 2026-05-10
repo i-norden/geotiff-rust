@@ -1,11 +1,15 @@
 use std::io::Cursor;
 
-use geotiff_core::tags::{TAG_GEO_KEY_DIRECTORY, TAG_MODEL_PIXEL_SCALE, TAG_MODEL_TIEPOINT};
+use geotiff_core::{
+    geokeys,
+    tags::{TAG_GEO_KEY_DIRECTORY, TAG_MODEL_PIXEL_SCALE, TAG_MODEL_TIEPOINT},
+    GeoKeySerializeError,
+};
 use geotiff_reader::GeoTiffFile;
 use geotiff_writer::{
     ColorMap, ColorModel, Compression, CrsKind, Error as GeoTiffWriteError, ExtraSample,
-    GeoTiffBuilder, GeoTransform, InkSet, JpegOptions, LercAdditionalCompression, LercOptions,
-    ModelType, PlanarConfiguration, RasterType, TiffVariant,
+    GeoKeyValue, GeoTiffBuilder, GeoTransform, InkSet, JpegOptions, LercAdditionalCompression,
+    LercOptions, ModelType, PlanarConfiguration, RasterType, TiffVariant,
 };
 use ndarray::{Array2, Array3};
 use tiff_core::{Tag, TagValue};
@@ -543,4 +547,26 @@ fn geotiff_writer_rejects_unsupported_ycbcr_subsampling() {
     assert!(
         matches!(err, GeoTiffWriteError::Tiff(tiff_writer::Error::InvalidConfig(message)) if message.contains("YCbCr subsampling"))
     );
+}
+
+#[test]
+fn geotiff_writer_rejects_oversized_geokey_serialization() {
+    let data = Array2::<u8>::from_elem((1, 1), 1);
+    let mut buf = Cursor::new(Vec::new());
+    let err = GeoTiffBuilder::new(1, 1)
+        .geokey(
+            geokeys::GT_CITATION,
+            GeoKeyValue::Ascii("x".repeat(u16::MAX as usize)),
+        )
+        .write_2d_to(&mut buf, data.view())
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        GeoTiffWriteError::GeoKey(GeoKeySerializeError::ValueCountTooLarge {
+            key_id: geokeys::GT_CITATION,
+            tag: 34737,
+            count
+        }) if count == u16::MAX as usize + 1
+    ));
 }
