@@ -34,19 +34,7 @@ pub(crate) fn read_window(
     let window_col_end = window.col_end();
     let output_row_bytes = window.cols * layout.pixel_stride_bytes();
 
-    let specs = collect_tile_specs(ifd, &layout)?;
-    let relevant_specs: Vec<_> = specs
-        .iter()
-        .copied()
-        .filter(|spec| {
-            let spec_row_end = spec.y + spec.rows_in_tile;
-            let spec_col_end = spec.x + spec.cols_in_tile;
-            spec.y < window_row_end
-                && spec_row_end > window.row_off
-                && spec.x < window_col_end
-                && spec_col_end > window.col_off
-        })
-        .collect();
+    let relevant_specs = collect_tile_specs_for_window(ifd, &layout, window, None)?;
 
     #[cfg(feature = "rayon")]
     let decoded_blocks: Result<Vec<_>> = relevant_specs
@@ -156,21 +144,7 @@ pub(crate) fn read_window_band(
     let window_col_end = window.col_end();
     let output_row_bytes = window.cols * layout.bytes_per_sample;
 
-    let specs = collect_tile_specs(ifd, &layout)?;
-    let relevant_specs: Vec<_> = specs
-        .iter()
-        .copied()
-        .filter(|spec| {
-            let spec_row_end = spec.y + spec.rows_in_tile;
-            let spec_col_end = spec.x + spec.cols_in_tile;
-            let overlaps_window = spec.y < window_row_end
-                && spec_row_end > window.row_off
-                && spec.x < window_col_end
-                && spec_col_end > window.col_off;
-            let overlaps_band = layout.planar_configuration == 1 || spec.plane == band_index;
-            overlaps_window && overlaps_band
-        })
-        .collect();
+    let relevant_specs = collect_tile_specs_for_window(ifd, &layout, window, Some(band_index))?;
 
     #[cfg(feature = "rayon")]
     let decoded_blocks: Result<Vec<_>> = relevant_specs
@@ -255,7 +229,12 @@ pub(crate) fn read_window_band(
     Ok(output)
 }
 
-fn collect_tile_specs(ifd: &Ifd, layout: &RasterLayout) -> Result<Vec<TileBlockSpec>> {
+fn collect_tile_specs_for_window(
+    ifd: &Ifd,
+    layout: &RasterLayout,
+    window: Window,
+    band_index: Option<usize>,
+) -> Result<Vec<TileBlockSpec>> {
     let tile_width = ifd
         .tile_width()
         .ok_or(Error::TagNotFound(crate::ifd::TAG_TILE_WIDTH))? as usize;
@@ -297,38 +276,52 @@ fn collect_tile_specs(ifd: &Ifd, layout: &RasterLayout) -> Result<Vec<TileBlockS
         )));
     }
 
-    Ok((0..expected)
-        .map(|tile_index| {
-            let plane = if layout.planar_configuration == 1 {
-                0
-            } else {
-                tile_index / tiles_per_plane
-            };
-            let plane_tile_index = if layout.planar_configuration == 1 {
-                tile_index
-            } else {
-                tile_index % tiles_per_plane
-            };
-            let tile_row = plane_tile_index / tiles_across;
-            let tile_col = plane_tile_index % tiles_across;
-            let x = tile_col * tile_width;
-            let y = tile_row * tile_height;
-            let cols_in_tile = tile_width.min(layout.width.saturating_sub(x));
-            let rows_in_tile = tile_height.min(layout.height.saturating_sub(y));
-            TileBlockSpec {
-                index: tile_index,
-                plane,
-                x,
-                y,
-                cols_in_tile,
-                rows_in_tile,
-                offset: offsets[tile_index],
-                byte_count: counts[tile_index],
-                tile_width,
-                tile_height,
+    let first_tile_row = window.row_off / tile_height;
+    let last_tile_row = window.row_end().div_ceil(tile_height).min(tiles_down);
+    let first_tile_col = window.col_off / tile_width;
+    let last_tile_col = window.col_end().div_ceil(tile_width).min(tiles_across);
+    let plane_range = if layout.planar_configuration == 1 {
+        0..1
+    } else if let Some(band_index) = band_index {
+        band_index..band_index + 1
+    } else {
+        0..layout.samples_per_pixel
+    };
+    let spec_count = (last_tile_row - first_tile_row)
+        .saturating_mul(last_tile_col - first_tile_col)
+        .saturating_mul(plane_range.end - plane_range.start);
+    let mut specs = Vec::with_capacity(spec_count);
+
+    for plane in plane_range {
+        for tile_row in first_tile_row..last_tile_row {
+            for tile_col in first_tile_col..last_tile_col {
+                let plane_tile_index = tile_row * tiles_across + tile_col;
+                let tile_index = if layout.planar_configuration == 1 {
+                    plane_tile_index
+                } else {
+                    plane * tiles_per_plane + plane_tile_index
+                };
+                let x = tile_col * tile_width;
+                let y = tile_row * tile_height;
+                let cols_in_tile = tile_width.min(layout.width.saturating_sub(x));
+                let rows_in_tile = tile_height.min(layout.height.saturating_sub(y));
+                specs.push(TileBlockSpec {
+                    index: tile_index,
+                    plane,
+                    x,
+                    y,
+                    cols_in_tile,
+                    rows_in_tile,
+                    offset: offsets[tile_index],
+                    byte_count: counts[tile_index],
+                    tile_width,
+                    tile_height,
+                });
             }
-        })
-        .collect())
+        }
+    }
+
+    Ok(specs)
 }
 
 #[derive(Clone, Copy)]

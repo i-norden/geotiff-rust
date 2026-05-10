@@ -33,15 +33,7 @@ pub(crate) fn read_window(
     let window_row_end = window.row_end();
     let output_row_bytes = window.cols * layout.pixel_stride_bytes();
 
-    let specs = collect_strip_specs(ifd, &layout)?;
-    let relevant_specs: Vec<_> = specs
-        .iter()
-        .copied()
-        .filter(|spec| {
-            let spec_row_end = spec.row_start + spec.rows_in_strip;
-            spec.row_start < window_row_end && spec_row_end > window.row_off
-        })
-        .collect();
+    let relevant_specs = collect_strip_specs_for_window(ifd, &layout, window, None)?;
 
     #[cfg(not(feature = "rayon"))]
     let decoded_blocks: Result<Vec<_>> = relevant_specs
@@ -144,17 +136,7 @@ pub(crate) fn read_window_band(
     let window_row_end = window.row_end();
     let output_row_bytes = window.cols * layout.bytes_per_sample;
 
-    let specs = collect_strip_specs(ifd, &layout)?;
-    let relevant_specs: Vec<_> = specs
-        .iter()
-        .copied()
-        .filter(|spec| {
-            let spec_row_end = spec.row_start + spec.rows_in_strip;
-            let overlaps_rows = spec.row_start < window_row_end && spec_row_end > window.row_off;
-            let overlaps_band = layout.planar_configuration == 1 || spec.plane == band_index;
-            overlaps_rows && overlaps_band
-        })
-        .collect();
+    let relevant_specs = collect_strip_specs_for_window(ifd, &layout, window, Some(band_index))?;
 
     #[cfg(not(feature = "rayon"))]
     let decoded_blocks: Result<Vec<_>> = relevant_specs
@@ -232,7 +214,12 @@ pub(crate) fn read_window_band(
     Ok(output)
 }
 
-fn collect_strip_specs(ifd: &Ifd, layout: &RasterLayout) -> Result<Vec<StripBlockSpec>> {
+fn collect_strip_specs_for_window(
+    ifd: &Ifd,
+    layout: &RasterLayout,
+    window: Window,
+    band_index: Option<usize>,
+) -> Result<Vec<StripBlockSpec>> {
     let offsets = ifd
         .strip_offsets()
         .ok_or(Error::TagNotFound(crate::ifd::TAG_STRIP_OFFSETS))?;
@@ -267,30 +254,42 @@ fn collect_strip_specs(ifd: &Ifd, layout: &RasterLayout) -> Result<Vec<StripBloc
         )));
     }
 
-    Ok((0..expected)
-        .map(|strip_index| {
-            let plane = if layout.planar_configuration == 1 {
-                0
+    let first_strip = window.row_off / rows_per_strip;
+    let last_strip = window
+        .row_end()
+        .div_ceil(rows_per_strip)
+        .min(strips_per_plane);
+    let plane_range = if layout.planar_configuration == 1 {
+        0..1
+    } else if let Some(band_index) = band_index {
+        band_index..band_index + 1
+    } else {
+        0..layout.samples_per_pixel
+    };
+    let spec_count = (last_strip - first_strip).saturating_mul(plane_range.end - plane_range.start);
+    let mut specs = Vec::with_capacity(spec_count);
+
+    for plane in plane_range {
+        for plane_strip_index in first_strip..last_strip {
+            let strip_index = if layout.planar_configuration == 1 {
+                plane_strip_index
             } else {
-                strip_index / strips_per_plane
-            };
-            let plane_strip_index = if layout.planar_configuration == 1 {
-                strip_index
-            } else {
-                strip_index % strips_per_plane
+                plane * strips_per_plane + plane_strip_index
             };
             let row_start = plane_strip_index * rows_per_strip;
             let rows_in_strip = rows_per_strip.min(layout.height.saturating_sub(row_start));
-            StripBlockSpec {
+            specs.push(StripBlockSpec {
                 index: strip_index,
                 plane,
                 row_start,
                 offset: offsets[strip_index],
                 byte_count: counts[strip_index],
                 rows_in_strip,
-            }
-        })
-        .collect())
+            });
+        }
+    }
+
+    Ok(specs)
 }
 
 #[derive(Clone, Copy)]
