@@ -572,7 +572,14 @@ fn collect_subifd_overviews(
 fn find_metadata_ifd_index(ifds: &[tiff_reader::Ifd]) -> Result<usize> {
     ifds.iter()
         .position(|ifd| ifd.tag(TAG_GEO_KEY_DIRECTORY).is_some())
+        .or_else(|| ifds.iter().position(has_model_georeferencing))
         .ok_or(Error::NotGeoTiff)
+}
+
+#[cfg(feature = "local")]
+fn has_model_georeferencing(ifd: &tiff_reader::Ifd) -> bool {
+    ifd.tag(TAG_MODEL_TRANSFORMATION).is_some()
+        || (ifd.tag(TAG_MODEL_TIEPOINT).is_some() && ifd.tag(TAG_MODEL_PIXEL_SCALE).is_some())
 }
 
 #[cfg(feature = "local")]
@@ -604,13 +611,15 @@ fn has_reduced_resolution_flag(ifd: &tiff_reader::Ifd) -> bool {
 
 #[cfg(feature = "local")]
 fn parse_geokey_directory(ifd: &tiff_reader::Ifd) -> Result<GeoKeyDirectory> {
-    let directory = ifd
+    let Some(directory) = ifd
         .tag(TAG_GEO_KEY_DIRECTORY)
         .and_then(|tag| match &tag.value {
             TagValue::Short(values) => Some(values.as_slice()),
             _ => None,
         })
-        .ok_or(Error::NotGeoTiff)?;
+    else {
+        return Ok(GeoKeyDirectory::new());
+    };
     let double_params = ifd
         .tag(TAG_GEO_DOUBLE_PARAMS)
         .and_then(|tag| tag.value.as_f64_vec())

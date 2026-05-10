@@ -15,7 +15,7 @@ pub enum Error {
     #[cfg(feature = "cog")]
     Http(#[from] reqwest::Error),
 
-    #[error("not a GeoTIFF: missing GeoKey directory (tag 34735)")]
+    #[error("not a GeoTIFF: missing GeoTIFF metadata")]
     NotGeoTiff,
 
     #[error("invalid GeoKey directory")]
