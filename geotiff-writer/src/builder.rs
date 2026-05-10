@@ -370,7 +370,7 @@ impl GeoTiffBuilder {
     }
 
     /// Build the GeoTIFF extra tags from the current metadata.
-    pub(crate) fn build_extra_tags(&self) -> Vec<Tag> {
+    pub(crate) fn build_extra_tags(&self) -> Result<Vec<Tag>> {
         let mut extra = Vec::new();
         let writes_georeferencing = self.transformation_matrix.is_some()
             || self.affine_transform.is_some()
@@ -418,7 +418,7 @@ impl GeoTiffBuilder {
 
         // GeoKey directory
         if writes_georeferencing || !self.geokeys.keys.is_empty() {
-            let (directory, double_params, ascii_params) = self.geokeys.serialize();
+            let (directory, double_params, ascii_params) = self.geokeys.serialize()?;
             extra.push(Tag::new(
                 tags::TAG_GEO_KEY_DIRECTORY,
                 TagValue::Short(directory),
@@ -442,7 +442,7 @@ impl GeoTiffBuilder {
             extra.push(Tag::new(tags::TAG_GDAL_NODATA, TagValue::Ascii(nd.clone())));
         }
 
-        extra
+        Ok(extra)
     }
 
     fn current_raster_type(&self) -> RasterType {
@@ -469,7 +469,7 @@ impl GeoTiffBuilder {
     }
 
     /// Build an ImageBuilder from this GeoTiffBuilder for a given sample type.
-    pub(crate) fn to_image_builder<T: WriteSample>(&self) -> ImageBuilder {
+    pub(crate) fn to_image_builder<T: WriteSample>(&self) -> Result<ImageBuilder> {
         self.to_sized_image_builder::<T>(self.width, self.height)
     }
 
@@ -479,7 +479,7 @@ impl GeoTiffBuilder {
         &self,
         width: u32,
         height: u32,
-    ) -> ImageBuilder {
+    ) -> Result<ImageBuilder> {
         let mut ib = ImageBuilder::new(width, height)
             .sample_type::<T>()
             .samples_per_pixel(self.bands as u16)
@@ -515,11 +515,11 @@ impl GeoTiffBuilder {
             ib = ib.tiles(tw, th);
         }
 
-        for tag in self.build_extra_tags() {
+        for tag in self.build_extra_tags()? {
             ib = ib.tag(tag);
         }
 
-        ib
+        Ok(ib)
     }
 
     // ---- Write methods ----
@@ -549,7 +549,8 @@ impl GeoTiffBuilder {
             });
         }
 
-        let ib = self.to_image_builder::<T>();
+        let ib = self.to_image_builder::<T>()?;
+        let block_count = ib.block_count();
         let mut writer = TiffWriter::new(
             sink,
             WriteOptions {
@@ -558,8 +559,6 @@ impl GeoTiffBuilder {
             },
         )?;
         let handle = writer.add_image(ib)?;
-
-        let block_count = self.images_block_count::<T>();
 
         for block_idx in 0..block_count {
             let samples = self.extract_block_2d(&data, block_idx);
@@ -596,7 +595,8 @@ impl GeoTiffBuilder {
             });
         }
 
-        let ib = self.to_image_builder::<T>();
+        let ib = self.to_image_builder::<T>()?;
+        let block_count = ib.block_count();
         let mut writer = TiffWriter::new(
             sink,
             WriteOptions {
@@ -606,7 +606,6 @@ impl GeoTiffBuilder {
         )?;
         let handle = writer.add_image(ib)?;
 
-        let block_count = self.images_block_count::<T>();
         for block_idx in 0..block_count {
             let samples = self.extract_block_3d(&data, block_idx);
             writer.write_block(&handle, block_idx, &samples)?;
@@ -632,10 +631,6 @@ impl GeoTiffBuilder {
         let file = File::create(path)?;
         let writer = BufWriter::new(file);
         self.tile_writer(writer)
-    }
-
-    fn images_block_count<T: WriteSample>(&self) -> usize {
-        self.to_image_builder::<T>().block_count()
     }
 
     fn extract_block_2d<T: WriteSample>(&self, data: &ArrayView2<T>, block_idx: usize) -> Vec<T> {

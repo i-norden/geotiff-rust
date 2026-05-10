@@ -785,13 +785,13 @@ impl CogBuilder {
         level: u32,
         tile_width: u32,
         tile_height: u32,
-    ) -> ImageBuilder {
+    ) -> Result<ImageBuilder> {
         let ovr_w = (self.inner.width as usize).div_ceil(level as usize) as u32;
         let ovr_h = (self.inner.height as usize).div_ceil(level as usize) as u32;
 
         let mut builder = self
             .inner
-            .to_sized_image_builder::<T>(ovr_w, ovr_h)
+            .to_sized_image_builder::<T>(ovr_w, ovr_h)?
             .tiles(tile_width, tile_height)
             .overview();
 
@@ -802,7 +802,7 @@ impl CogBuilder {
             builder = builder.jpeg_options(opts);
         }
 
-        builder
+        Ok(builder)
     }
 
     fn validate_images<T: NumericSample>(
@@ -811,9 +811,9 @@ impl CogBuilder {
         tile_width: u32,
         tile_height: u32,
     ) -> Result<()> {
-        self.inner.to_image_builder::<T>().validate()?;
+        self.inner.to_image_builder::<T>()?.validate()?;
         for &level in overview_levels {
-            self.overview_image_builder::<T>(level, tile_width, tile_height)
+            self.overview_image_builder::<T>(level, tile_width, tile_height)?
                 .validate()?;
         }
         Ok(())
@@ -824,10 +824,10 @@ impl CogBuilder {
         overview_levels: &[u32],
         tile_width: u32,
         tile_height: u32,
-    ) -> Vec<CogImage> {
+    ) -> Result<Vec<CogImage>> {
         let mut images = Vec::with_capacity(1 + overview_levels.len());
         images.push(CogImage {
-            builder: self.inner.to_image_builder::<T>(),
+            builder: self.inner.to_image_builder::<T>()?,
             blocks: Vec::new(),
             sub_ifd_count: if matches!(self.overview_storage, OverviewStorage::SubIfds) {
                 overview_levels.len()
@@ -837,12 +837,12 @@ impl CogBuilder {
         });
         for &level in overview_levels {
             images.push(CogImage {
-                builder: self.overview_image_builder::<T>(level, tile_width, tile_height),
+                builder: self.overview_image_builder::<T>(level, tile_width, tile_height)?,
                 blocks: Vec::new(),
                 sub_ifd_count: 0,
             });
         }
-        images
+        Ok(images)
     }
 
     /// Write a complete COG from a 2D array to a file path.
@@ -917,7 +917,7 @@ impl CogBuilder {
         let nodata = parse_nodata_value::<T>(&self.inner.nodata);
         let prefix = gdal_structural_metadata_bytes(self.inner.planar_configuration);
         let mut spool = BlockSpool::new()?;
-        let mut images = self.build_images::<T>(&overview_levels, tw as u32, th as u32);
+        let mut images = self.build_images::<T>(&overview_levels, tw as u32, th as u32)?;
 
         for idx in (0..overview_levels.len()).rev() {
             let overview =
@@ -1208,7 +1208,7 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
         let mut spool = BlockSpool::new()?;
         let mut images =
             self.cog
-                .build_images::<T>(&self.overview_levels, self.tile_width, self.tile_height);
+                .build_images::<T>(&self.overview_levels, self.tile_width, self.tile_height)?;
         let plan = TileWritePlan {
             tile_width: tw,
             tile_height: th,

@@ -10,6 +10,9 @@ pub enum Error {
     #[error("TIFF writer error: {0}")]
     Tiff(#[from] tiff_writer::Error),
 
+    #[error("GeoKey serialization error: {0}")]
+    GeoKey(#[from] geotiff_core::GeoKeySerializeError),
+
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
 
