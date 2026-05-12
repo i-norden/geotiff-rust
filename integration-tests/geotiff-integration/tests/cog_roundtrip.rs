@@ -76,6 +76,23 @@ fn assert_no_duplicate_tags(ifd: &tiff_reader::Ifd, tags: &[u16], context: &str)
     }
 }
 
+fn assert_model_tiepoint_and_scale(
+    ifd: &tiff_reader::Ifd,
+    expected_tiepoint: [f64; 6],
+    expected_scale: [f64; 3],
+) {
+    let tiepoint = ifd
+        .tag(TAG_MODEL_TIEPOINT)
+        .and_then(|tag| tag.value.as_f64_vec())
+        .unwrap();
+    let scale = ifd
+        .tag(TAG_MODEL_PIXEL_SCALE)
+        .and_then(|tag| tag.value.as_f64_vec())
+        .unwrap();
+    assert_eq!(tiepoint.as_slice(), &expected_tiepoint);
+    assert_eq!(scale.as_slice(), &expected_scale);
+}
+
 #[test]
 fn cog_layout_and_overview_discovery_roundtrip() {
     let data = Array2::<u8>::from_elem((64, 64), 42);
@@ -107,6 +124,21 @@ fn cog_layout_and_overview_discovery_roundtrip() {
     for index in 1..tiff.ifd_count() {
         assert_no_duplicate_tags(tiff.ifd(index).unwrap(), &geotiff_tags, "COG overview IFD");
     }
+    assert_model_tiepoint_and_scale(
+        tiff.ifd(0).unwrap(),
+        [0.0, 0.0, 0.0, 0.0, 64.0, 0.0],
+        [1.0, 1.0, 0.0],
+    );
+    assert_model_tiepoint_and_scale(
+        tiff.ifd(1).unwrap(),
+        [0.0, 0.0, 0.0, 0.0, 64.0, 0.0],
+        [2.0, 2.0, 0.0],
+    );
+    assert_model_tiepoint_and_scale(
+        tiff.ifd(2).unwrap(),
+        [0.0, 0.0, 0.0, 0.0, 64.0, 0.0],
+        [4.0, 4.0, 0.0],
+    );
     assert_eq!(
         &bytes[8..8 + gdal_structural_metadata_bytes(PlanarConfiguration::Chunky).len()],
         gdal_structural_metadata_bytes(PlanarConfiguration::Chunky).as_slice()
@@ -151,6 +183,16 @@ fn cog_can_write_subifd_overviews() {
         geo.overview_ifd_index(0),
         Err(GeoTiffReadError::OverviewHasNoTopLevelIfdIndex(0))
     ));
+    assert_model_tiepoint_and_scale(
+        geo.overview_ifd(0).unwrap(),
+        [0.0, 0.0, 0.0, 0.0, 64.0, 0.0],
+        [2.0, 2.0, 0.0],
+    );
+    assert_model_tiepoint_and_scale(
+        geo.overview_ifd(1).unwrap(),
+        [0.0, 0.0, 0.0, 0.0, 64.0, 0.0],
+        [4.0, 4.0, 0.0],
+    );
     assert_eq!(geo.read_overview::<u8>(0).unwrap().shape(), &[32, 32]);
     assert_eq!(geo.read_overview::<u8>(1).unwrap().shape(), &[16, 16]);
 }

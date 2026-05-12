@@ -4,7 +4,13 @@
 
 - Add storage-domain single-band read APIs to `tiff-reader` and `geotiff-reader`, including full-image and windowed reads that return `[rows, cols]` arrays.
 - Optimize separate-planar band reads so the reader only decodes the requested band plane instead of every plane.
+- Optimize windowed strip/tile reads so small windows enumerate only intersecting storage blocks.
 - Fix `block_cache_slots = 0` and HTTP `cache_slots = 0` so zero slots consistently disables cache storage.
+- Fix PixelIsPoint GeoTIFF writing so transform serialization preserves normalized coordinates without a half-pixel shift.
+- Support transform-only GeoTIFF metadata by accepting model georeferencing without a GeoKey directory and emitting a minimal GeoKey directory when writing transforms without CRS keys.
+- Add SubIFD-backed COG overview writing alongside the existing top-level overview IFD layout, and scale overview georeferencing to each overview level.
+- Remove duplicate GeoTIFF tags from COG overview IFDs.
+- Make GeoKey serialization fallible instead of truncating oversized key counts and parameter offsets.
 - Add coverage for chunky and separate-planar band reads, GeoTIFF band windows, and disabled zero-slot range caches.
 
 ## 0.4.0
