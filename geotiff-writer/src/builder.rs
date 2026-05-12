@@ -445,6 +445,50 @@ impl GeoTiffBuilder {
         Ok(extra)
     }
 
+    pub(crate) fn with_overview_georeferencing(&self, level: u32) -> Self {
+        let factor = level as f64;
+        if factor == 1.0 {
+            return self.clone();
+        }
+
+        let mut builder = self.clone();
+        if let Some(matrix) = self.transformation_matrix {
+            builder.transformation_matrix = Some(scale_transformation_matrix(matrix, factor));
+            builder.affine_transform = None;
+            builder.pixel_scale = None;
+            builder.tiepoint = None;
+            builder.tiepoint_is_origin = false;
+        } else if let Some(transform) = self.affine_transform {
+            builder.affine_transform = Some(scale_transform_for_overview(transform, factor));
+        } else if let (Some(tiepoint), Some(pixel_scale)) = (self.tiepoint, self.pixel_scale) {
+            let transform = if self.tiepoint_is_origin {
+                GeoTransform::from_origin_and_pixel_size(
+                    tiepoint[3],
+                    tiepoint[4],
+                    pixel_scale[0],
+                    -pixel_scale[1],
+                )
+            } else {
+                GeoTransform::from_tiepoint_and_scale_with_raster_type(
+                    &tiepoint,
+                    &pixel_scale,
+                    self.current_raster_type(),
+                )
+            };
+            builder.affine_transform = Some(scale_transform_for_overview(transform, factor));
+            builder.transformation_matrix = None;
+            builder.pixel_scale = None;
+            builder.tiepoint = None;
+            builder.tiepoint_is_origin = false;
+        } else if let Some(mut pixel_scale) = self.pixel_scale {
+            pixel_scale[0] *= factor;
+            pixel_scale[1] *= factor;
+            builder.pixel_scale = Some(pixel_scale);
+        }
+
+        builder
+    }
+
     fn current_raster_type(&self) -> RasterType {
         self.geokeys
             .get_short(geokeys::GT_RASTER_TYPE)
@@ -776,4 +820,22 @@ impl GeoTiffBuilder {
     fn rows_per_strip(&self) -> usize {
         self.height.min(256) as usize
     }
+}
+
+fn scale_transform_for_overview(transform: GeoTransform, factor: f64) -> GeoTransform {
+    GeoTransform {
+        origin_x: transform.origin_x,
+        pixel_width: transform.pixel_width * factor,
+        skew_x: transform.skew_x * factor,
+        origin_y: transform.origin_y,
+        skew_y: transform.skew_y * factor,
+        pixel_height: transform.pixel_height * factor,
+    }
+}
+
+fn scale_transformation_matrix(mut matrix: [f64; 16], factor: f64) -> [f64; 16] {
+    for index in [0usize, 1, 4, 5, 8, 9, 12, 13] {
+        matrix[index] *= factor;
+    }
+    matrix
 }

@@ -789,8 +789,8 @@ impl CogBuilder {
         let ovr_w = (self.inner.width as usize).div_ceil(level as usize) as u32;
         let ovr_h = (self.inner.height as usize).div_ceil(level as usize) as u32;
 
-        let mut builder = self
-            .inner
+        let overview_builder = self.inner.with_overview_georeferencing(level);
+        let mut builder = overview_builder
             .to_sized_image_builder::<T>(ovr_w, ovr_h)?
             .tiles(tile_width, tile_height)
             .overview();

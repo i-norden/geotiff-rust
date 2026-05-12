@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use geotiff_reader::GeoTiffFile;
+use geotiff_writer::OverviewStorage;
 use geotiff_writer::{
     CogBuilder, Compression, GeoTiffBuilder, JpegOptions, PhotometricInterpretation,
     PlanarConfiguration, Resampling,
@@ -23,6 +24,14 @@ fn assert_shape<T>(array: &ArrayD<T>, width: u32, height: u32, band_count: u64) 
 }
 
 fn write_generated_planar_multiband_cog(path: &Path) {
+    write_generated_planar_multiband_cog_with_storage(path, OverviewStorage::TopLevelIfds);
+}
+
+fn write_generated_planar_multiband_subifd_cog(path: &Path) {
+    write_generated_planar_multiband_cog_with_storage(path, OverviewStorage::SubIfds);
+}
+
+fn write_generated_planar_multiband_cog_with_storage(path: &Path, storage: OverviewStorage) {
     let mut data = Array3::<u8>::zeros((64, 64, 3));
     for row in 0..64 {
         for col in 0..64 {
@@ -44,6 +53,7 @@ fn write_generated_planar_multiband_cog(path: &Path) {
 
     CogBuilder::new(builder)
         .overview_levels(vec![2, 4])
+        .overview_storage(storage)
         .resampling(Resampling::NearestNeighbor)
         .write_3d(path, data.view())
         .unwrap();
@@ -148,6 +158,31 @@ fn matches_gdal_for_generated_planar_multiband_cog() {
     );
     assert_eq!(reference_json["interleave"].as_str(), Some("BAND"));
 
+    assert_gdal_hash_matches(fixture.path(), None);
+    for overview_index in 0..file.overview_count() {
+        assert_gdal_hash_matches(fixture.path(), Some(overview_index));
+    }
+}
+
+#[test]
+fn matches_gdal_for_generated_subifd_cog() {
+    if !reference::python_gdal_available() {
+        eprintln!(
+            "skipping GDAL SubIFD COG parity test because Python GDAL bindings are unavailable"
+        );
+        return;
+    }
+
+    let fixture = NamedTempFile::new().unwrap();
+    write_generated_planar_multiband_subifd_cog(fixture.path());
+
+    let path_str = fixture.path().to_str().unwrap();
+    let reference_json =
+        reference::run_reference_json(env!("CARGO_MANIFEST_DIR"), &["metadata", path_str]);
+    let file = GeoTiffFile::open(fixture.path()).unwrap();
+
+    assert_eq!(reference_json["overview_count"].as_u64(), Some(2));
+    assert_eq!(file.overview_count(), 2);
     assert_gdal_hash_matches(fixture.path(), None);
     for overview_index in 0..file.overview_count() {
         assert_gdal_hash_matches(fixture.path(), Some(overview_index));

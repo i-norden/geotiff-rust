@@ -128,7 +128,7 @@ with `bands(...)` and optional
 - Photometric/color-model tags: palette `ColorMap`, `ExtraSamples` alpha, CMYK (`Separated` + `InkSet`), and YCbCr 4:4:4
 - Streaming tile-by-tile GeoTIFF writes for large rasters
 - GeoTIFF metadata: projected/geographic/geocentric/vertical compound CRS keys, pixel scale, origin, affine transforms, NoData
-- COG output with GDAL-compatible ghost-area metadata, overview generation (nearest-neighbor, average), and multi-band chunky/planar rasters
+- COG output with GDAL-compatible ghost-area metadata, overview generation (nearest-neighbor, average), top-level or SubIFD-backed overview IFDs, and multi-band chunky/planar rasters
 - Disk-backed tile-wise COG assembly via `CogTileWriter` (base tiles are staged in a temporary raw tile store before final emission)
 
 ## Codec Notes
