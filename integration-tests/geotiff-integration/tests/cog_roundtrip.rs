@@ -4,6 +4,7 @@ use geotiff_core::tags::{
     TAG_GDAL_NODATA, TAG_GEO_ASCII_PARAMS, TAG_GEO_DOUBLE_PARAMS, TAG_GEO_KEY_DIRECTORY,
     TAG_MODEL_PIXEL_SCALE, TAG_MODEL_TIEPOINT, TAG_MODEL_TRANSFORMATION,
 };
+use geotiff_core::transform::GeoTransform;
 use geotiff_reader::{Error as GeoTiffReadError, GeoTiffFile};
 use geotiff_writer::{
     CogBuilder, Compression, Error as GeoTiffWriteError, GeoTiffBuilder, JpegOptions,
@@ -93,6 +94,16 @@ fn assert_model_tiepoint_and_scale(
     assert_eq!(scale.as_slice(), &expected_scale);
 }
 
+fn assert_model_transformation(ifd: &tiff_reader::Ifd, expected: [f64; 16]) {
+    let matrix = ifd
+        .tag(TAG_MODEL_TRANSFORMATION)
+        .and_then(|tag| tag.value.as_f64_vec())
+        .unwrap();
+    assert_eq!(matrix.as_slice(), &expected);
+    assert!(ifd.tag(TAG_MODEL_TIEPOINT).is_none());
+    assert!(ifd.tag(TAG_MODEL_PIXEL_SCALE).is_none());
+}
+
 #[test]
 fn cog_layout_and_overview_discovery_roundtrip() {
     let data = Array2::<u8>::from_elem((64, 64), 42);
@@ -151,6 +162,47 @@ fn cog_layout_and_overview_discovery_roundtrip() {
     assert_eq!(geo.read_raster::<u8>().unwrap().shape(), &[64, 64]);
     assert_eq!(geo.read_overview::<u8>(0).unwrap().shape(), &[32, 32]);
     assert_eq!(geo.read_overview::<u8>(1).unwrap().shape(), &[16, 16]);
+}
+
+#[test]
+fn cog_overview_transformation_matrix_scales_pixel_axes() {
+    let data = Array2::<u8>::from_elem((32, 32), 9);
+    let transform = GeoTransform {
+        origin_x: 100.0,
+        pixel_width: 2.0,
+        skew_x: 0.25,
+        origin_y: 200.0,
+        skew_y: -0.5,
+        pixel_height: -3.0,
+    };
+    let mut buf = Cursor::new(Vec::new());
+    let builder = GeoTiffBuilder::new(32, 32)
+        .tile_size(16, 16)
+        .epsg(4326)
+        .transform(transform);
+
+    CogBuilder::new(builder)
+        .overview_levels(vec![2])
+        .write_2d_to(&mut buf, data.view())
+        .unwrap();
+
+    let bytes = buf.into_inner();
+    let tiff = TiffFile::from_bytes(bytes.clone()).unwrap();
+    assert_model_transformation(
+        tiff.ifd(0).unwrap(),
+        [
+            2.0, 0.25, 0.0, 100.0, -0.5, -3.0, 0.0, 200.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ],
+    );
+    assert_model_transformation(
+        tiff.ifd(1).unwrap(),
+        [
+            4.0, 0.5, 0.0, 100.0, -1.0, -6.0, 0.0, 200.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ],
+    );
+
+    let geo = GeoTiffFile::from_bytes(bytes).unwrap();
+    assert_eq!(geo.read_overview::<u8>(0).unwrap().shape(), &[16, 16]);
 }
 
 #[test]

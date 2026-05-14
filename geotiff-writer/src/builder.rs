@@ -834,6 +834,9 @@ fn scale_transform_for_overview(transform: GeoTransform, factor: f64) -> GeoTran
 }
 
 fn scale_transformation_matrix(mut matrix: [f64; 16], factor: f64) -> [f64; 16] {
+    // Compose with diag(factor, factor, 1, 1) on the pixel-coordinate side.
+    // Row-major storage means that scales columns 0 and 1 while preserving
+    // the model-space translation.
     for index in [0usize, 1, 4, 5, 8, 9, 12, 13] {
         matrix[index] *= factor;
     }
