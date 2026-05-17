@@ -229,6 +229,7 @@ pub(crate) fn lerc_encode<T: lerc_core::Sample>(
     let options = lerc_writer::EncodeOptions {
         max_z_error,
         micro_block_size: 8,
+        no_data_value: None,
     };
     lerc_writer::encode(raster, None, options).map_err(|e| Error::CompressionFailed {
         index,

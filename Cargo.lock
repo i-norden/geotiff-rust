@@ -795,21 +795,21 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "lerc-band-materialize"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07ad02b62a38008d9615a52159fd3b7e56aca97ee013fdec55cfe80040cc5aa5"
+checksum = "c9aedba056594e84ab0f4781c551f22f8d8877df363848b1763bb5423c2c9899"
 
 [[package]]
 name = "lerc-core"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f428c60749fada87c7a95d08bc3942d05e4a9e3e0543a460a3331bb751dd2ddc"
+checksum = "5486e6b59aeb128889ce2f50c43104a833145a47b66b668c30ebcf317c618b90"
 
 [[package]]
 name = "lerc-reader"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68327488da0851ab38d662f6aa0baf29ee16192a5e286429aa02b3ffd71a5565"
+checksum = "f365f34073bf8e80db72efd7ba342e607758422074037fee16efc2af011df2e4"
 dependencies = [
  "lerc-band-materialize",
  "lerc-core",
@@ -818,9 +818,9 @@ dependencies = [
 
 [[package]]
 name = "lerc-writer"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d281f7aaa603b0562ceb1901c9b85bec7f19b1f2b9fc651cbc122906f4422411"
+checksum = "85b33d60b3c4be29a919e8fb45ff87077585908c8b2727306dfa55fab8ab7ac3"
 dependencies = [
  "lerc-core",
 ]
