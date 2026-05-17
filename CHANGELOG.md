@@ -11,7 +11,8 @@
 - Add SubIFD-backed COG overview writing alongside the existing top-level overview IFD layout, and scale overview georeferencing to each overview level.
 - Remove duplicate GeoTIFF tags from COG overview IFDs.
 - Make GeoKey serialization fallible instead of truncating oversized key counts and parameter offsets.
-- Add coverage for chunky and separate-planar band reads, GeoTIFF band windows, and disabled zero-slot range caches.
+- Update `lerc-rust` dependencies to `0.4.0`.
+- Add coverage for chunky and separate-planar band reads, GeoTIFF band windows, disabled zero-slot range caches, and LERC interoperability fuzz seeds.
 
 ## 0.4.0
 

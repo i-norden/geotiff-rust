@@ -1742,6 +1742,29 @@ mod tests {
     }
 
     #[test]
+    fn rejects_lerc2_blob_size_before_checksum_range_without_panicking() {
+        let mut blob = build_lerc2_header_v4(1, 1, 1, 1, 1, 0.0, 1.0, 1.0, 0);
+        blob[34..38].copy_from_slice(&8i32.to_le_bytes());
+
+        let data = build_lerc_tiff(1, 1, &blob, 8, 1, 1, Some([4, 0]));
+        let file = TiffFile::from_bytes(data).unwrap();
+        let error = file.read_image_bytes(0).unwrap_err();
+        assert!(error.to_string().contains("invalid Lerc2 v4 blob size 8"));
+    }
+
+    #[test]
+    fn rejects_lerc2_header_dimensions_before_allocating_mask() {
+        let mut blob = build_lerc2_header_v2(u32::MAX, u32::MAX, 1, 1, 0.0, 0.0, 1.0, 4);
+        blob.extend_from_slice(&4u32.to_le_bytes());
+        blob.extend_from_slice(&[0, 0, 0, 0]);
+
+        let data = build_lerc_tiff(1, 1, &blob, 8, 1, 1, None);
+        let file = TiffFile::from_bytes(data).unwrap();
+        let error = file.read_image_bytes(0).unwrap_err();
+        assert!(error.to_string().contains("LERC raster dimensions"));
+    }
+
+    #[test]
     fn reads_lerc_deflate_f32_strip() {
         let mut blob = build_lerc2_header_v2(2, 2, 4, 6, 0.0, 1.0, 4.0, 1 + 16);
         blob.extend_from_slice(&0u32.to_le_bytes());

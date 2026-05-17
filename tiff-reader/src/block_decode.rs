@@ -6,6 +6,9 @@ use lerc_core::{DataType, PixelData};
 use lerc_reader::DecodedBandSet;
 use tiff_core::{ColorModel, Compression, RasterLayout, SampleFormat};
 
+const LERC1_MAGIC_PREFIX: &[u8; 9] = b"CntZImage";
+const LERC2_MAGIC: &[u8; 6] = b"Lerc2 ";
+
 pub(crate) struct BlockDecodeRequest<'a> {
     pub ifd: &'a Ifd,
     pub layout: RasterLayout,
@@ -24,6 +27,15 @@ struct SerializationPlan {
     depth: usize,
     layout: RasterLayout,
     index: usize,
+}
+
+#[derive(Clone, Copy)]
+struct Lerc2Header {
+    width: u32,
+    height: u32,
+    depth: u32,
+    data_type: DataType,
+    blob_size: usize,
 }
 
 pub(crate) fn decode_compressed_block(request: BlockDecodeRequest<'_>) -> Result<Vec<u8>> {
@@ -319,6 +331,13 @@ fn decode_lerc_block(request: BlockDecodeRequest<'_>, expected_len: usize) -> Re
         )?,
     };
 
+    validate_lerc_payload_before_decode(
+        &payload,
+        request.layout,
+        request.block_width,
+        request.block_height,
+        request.index,
+    )?;
     let decoded =
         lerc_reader::decode_band_set(&payload).map_err(|error| Error::DecompressionFailed {
             index: request.index,
@@ -332,6 +351,191 @@ fn decode_lerc_block(request: BlockDecodeRequest<'_>, expected_len: usize) -> Re
         request.index,
     )?;
     serialize_lerc_band_set(&decoded, request.layout, expected_len, request.index)
+}
+
+fn validate_lerc_payload_before_decode(
+    payload: &[u8],
+    layout: RasterLayout,
+    block_width: usize,
+    block_height: usize,
+    index: usize,
+) -> Result<()> {
+    let mut offset = 0usize;
+    let expected_type = expected_lerc_data_type(layout)?;
+    let expected_samples = if layout.planar_configuration == 1 {
+        layout.samples_per_pixel
+    } else {
+        1
+    };
+    let mut band_count = 0usize;
+    let mut shared_depth = None;
+
+    while offset < payload.len() {
+        let slice = &payload[offset..];
+        if slice.starts_with(LERC1_MAGIC_PREFIX) || !slice.starts_with(LERC2_MAGIC) {
+            // Lerc1 does not carry a cheap top-level blob size. Let the reader
+            // produce the canonical error for Lerc1 and invalid-magic payloads.
+            return Ok(());
+        }
+
+        let Some(header) = parse_lerc2_header(slice, index)? else {
+            return Ok(());
+        };
+        if header.blob_size > slice.len() {
+            return Ok(());
+        }
+        if header.width as usize != block_width || header.height as usize != block_height {
+            return Err(Error::DecompressionFailed {
+                index,
+                reason: format!(
+                    "LERC raster dimensions {}x{} do not match TIFF block {}x{}",
+                    header.width, header.height, block_width, block_height
+                ),
+            });
+        }
+        if header.data_type != expected_type {
+            return Err(Error::DecompressionFailed {
+                index,
+                reason: format!(
+                    "LERC data type {} does not match TIFF sample layout (sample_format={} bits_per_sample={})",
+                    header.data_type.name(),
+                    layout.sample_format,
+                    layout.bits_per_sample
+                ),
+            });
+        }
+        if header.depth == 0 {
+            return Err(Error::DecompressionFailed {
+                index,
+                reason: "LERC depth must be greater than zero".into(),
+            });
+        }
+        match shared_depth {
+            Some(depth) if depth != header.depth => {
+                return Err(Error::DecompressionFailed {
+                    index,
+                    reason: "LERC band set contains mismatched depth values".into(),
+                });
+            }
+            Some(_) => {}
+            None => shared_depth = Some(header.depth),
+        }
+
+        band_count += 1;
+        offset = offset
+            .checked_add(header.blob_size)
+            .ok_or_else(|| Error::InvalidImageLayout("LERC band offset overflows usize".into()))?;
+    }
+
+    if let Some(depth) = shared_depth {
+        let depth = depth as usize;
+        if !((band_count == 1 && depth == expected_samples)
+            || (depth == 1 && band_count == expected_samples))
+        {
+            return Err(Error::DecompressionFailed {
+                index,
+                reason: format!(
+                    "LERC band/depth layout band_count={band_count} depth={depth} does not match TIFF samples_per_pixel={expected_samples}"
+                ),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_lerc2_header(slice: &[u8], index: usize) -> Result<Option<Lerc2Header>> {
+    let Some(version) = read_i32_le_at(slice, 6) else {
+        return Ok(None);
+    };
+    let Some(blob_size_offset) = lerc2_blob_size_offset(version) else {
+        return Ok(None);
+    };
+    let Some(blob_size) = read_i32_le_at(slice, blob_size_offset) else {
+        return Ok(None);
+    };
+    let Some(min_blob_size) = lerc2_min_blob_size(version) else {
+        return Ok(None);
+    };
+    if blob_size <= 0 || (blob_size as usize) < min_blob_size {
+        return Err(Error::DecompressionFailed {
+            index,
+            reason: format!(
+                "LERC: invalid Lerc2 v{version} blob size {blob_size}; expected at least {min_blob_size} bytes"
+            ),
+        });
+    }
+
+    let Some(height_offset) = lerc2_height_offset(version) else {
+        return Ok(None);
+    };
+    let Some(height) = read_u32_le_at(slice, height_offset) else {
+        return Ok(None);
+    };
+    let Some(width) = read_u32_le_at(slice, height_offset + 4) else {
+        return Ok(None);
+    };
+    let depth = if version >= 4 {
+        let Some(depth) = read_u32_le_at(slice, height_offset + 8) else {
+            return Ok(None);
+        };
+        depth
+    } else {
+        1
+    };
+    let Some(data_type_code) = read_i32_le_at(slice, blob_size_offset + 4) else {
+        return Ok(None);
+    };
+    let data_type =
+        DataType::from_code(data_type_code).map_err(|error| Error::DecompressionFailed {
+            index,
+            reason: format!("LERC: {error}"),
+        })?;
+
+    Ok(Some(Lerc2Header {
+        width,
+        height,
+        depth,
+        data_type,
+        blob_size: blob_size as usize,
+    }))
+}
+
+fn lerc2_height_offset(version: i32) -> Option<usize> {
+    match version {
+        1 | 2 => Some(10),
+        3..=6 => Some(14),
+        _ => None,
+    }
+}
+
+fn lerc2_blob_size_offset(version: i32) -> Option<usize> {
+    match version {
+        1 | 2 => Some(26),
+        3 => Some(30),
+        4..=6 => Some(34),
+        _ => None,
+    }
+}
+
+fn lerc2_min_blob_size(version: i32) -> Option<usize> {
+    match version {
+        1 | 2 => Some(62),
+        3 => Some(66),
+        4 | 5 => Some(70),
+        6 => Some(94),
+        _ => None,
+    }
+}
+
+fn read_i32_le_at(bytes: &[u8], offset: usize) -> Option<i32> {
+    let end = offset.checked_add(4)?;
+    Some(i32::from_le_bytes(bytes.get(offset..end)?.try_into().ok()?))
+}
+
+fn read_u32_le_at(bytes: &[u8], offset: usize) -> Option<u32> {
+    let end = offset.checked_add(4)?;
+    Some(u32::from_le_bytes(bytes.get(offset..end)?.try_into().ok()?))
 }
 
 fn validate_lerc_layout(

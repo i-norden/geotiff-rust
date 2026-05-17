@@ -88,6 +88,10 @@ jobs:
         run: |
           ./scripts/seed-fuzz-corpus.sh
           git diff --exit-code -- fuzz/corpus
+          if [ -n "$(git status --short -- fuzz/corpus)" ]; then
+            git status --short -- fuzz/corpus
+            exit 1
+          fi
 
   fuzz:
     name: Fuzz
