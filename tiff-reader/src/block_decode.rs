@@ -6,6 +6,9 @@ use lerc_core::{DataType, PixelData};
 use lerc_reader::DecodedBandSet;
 use tiff_core::{ColorModel, Compression, RasterLayout, SampleFormat};
 
+const LERC1_MAGIC_PREFIX: &[u8; 9] = b"CntZImage";
+const LERC2_MAGIC: &[u8; 6] = b"Lerc2 ";
+
 pub(crate) struct BlockDecodeRequest<'a> {
     pub ifd: &'a Ifd,
     pub layout: RasterLayout,
@@ -319,6 +322,7 @@ fn decode_lerc_block(request: BlockDecodeRequest<'_>, expected_len: usize) -> Re
         )?,
     };
 
+    validate_lerc_payload_before_decode(&payload, request.index)?;
     let decoded =
         lerc_reader::decode_band_set(&payload).map_err(|error| Error::DecompressionFailed {
             index: request.index,
@@ -332,6 +336,74 @@ fn decode_lerc_block(request: BlockDecodeRequest<'_>, expected_len: usize) -> Re
         request.index,
     )?;
     serialize_lerc_band_set(&decoded, request.layout, expected_len, request.index)
+}
+
+fn validate_lerc_payload_before_decode(payload: &[u8], index: usize) -> Result<()> {
+    let mut offset = 0usize;
+
+    while offset < payload.len() {
+        let slice = &payload[offset..];
+        if slice.starts_with(LERC1_MAGIC_PREFIX) || !slice.starts_with(LERC2_MAGIC) {
+            // Lerc1 does not carry a cheap top-level blob size. Let the reader
+            // produce the canonical error for Lerc1 and invalid-magic payloads.
+            return Ok(());
+        }
+
+        let Some(version) = read_i32_le_at(slice, 6) else {
+            return Ok(());
+        };
+        let Some(blob_size_offset) = lerc2_blob_size_offset(version) else {
+            return Ok(());
+        };
+        let Some(blob_size) = read_i32_le_at(slice, blob_size_offset) else {
+            return Ok(());
+        };
+        let Some(min_blob_size) = lerc2_min_blob_size(version) else {
+            return Ok(());
+        };
+        if blob_size <= 0 || (blob_size as usize) < min_blob_size {
+            return Err(Error::DecompressionFailed {
+                index,
+                reason: format!(
+                    "LERC: invalid Lerc2 v{version} blob size {blob_size}; expected at least {min_blob_size} bytes"
+                ),
+            });
+        }
+
+        let blob_size = blob_size as usize;
+        if blob_size > slice.len() {
+            return Ok(());
+        }
+        offset = offset
+            .checked_add(blob_size)
+            .ok_or_else(|| Error::InvalidImageLayout("LERC band offset overflows usize".into()))?;
+    }
+
+    Ok(())
+}
+
+fn lerc2_blob_size_offset(version: i32) -> Option<usize> {
+    match version {
+        1 | 2 => Some(26),
+        3 => Some(30),
+        4..=6 => Some(34),
+        _ => None,
+    }
+}
+
+fn lerc2_min_blob_size(version: i32) -> Option<usize> {
+    match version {
+        1 | 2 => Some(62),
+        3 => Some(66),
+        4 | 5 => Some(70),
+        6 => Some(94),
+        _ => None,
+    }
+}
+
+fn read_i32_le_at(bytes: &[u8], offset: usize) -> Option<i32> {
+    let end = offset.checked_add(4)?;
+    Some(i32::from_le_bytes(bytes.get(offset..end)?.try_into().ok()?))
 }
 
 fn validate_lerc_layout(
