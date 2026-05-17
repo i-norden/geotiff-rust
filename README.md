@@ -152,8 +152,8 @@ TIFF-side shared `JPEGTables`.
 ## Testing
 
 ```sh
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 Reference-library parity tests are included for `tiff-reader` and

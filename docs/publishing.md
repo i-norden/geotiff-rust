@@ -14,7 +14,7 @@ versions:
 Run the release checks before publishing:
 
 ```sh
-cargo test --workspace
+cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo doc --workspace --all-features --no-deps
 cargo package -p tiff-core
