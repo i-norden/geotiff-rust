@@ -381,9 +381,6 @@ fn validate_lerc_payload_before_decode(
         let Some(header) = parse_lerc2_header(slice, index)? else {
             return Ok(());
         };
-        if header.blob_size > slice.len() {
-            return Ok(());
-        }
         if header.width as usize != block_width || header.height as usize != block_height {
             return Err(Error::DecompressionFailed {
                 index,
@@ -419,6 +416,9 @@ fn validate_lerc_payload_before_decode(
             }
             Some(_) => {}
             None => shared_depth = Some(header.depth),
+        }
+        if header.blob_size > slice.len() {
+            return Ok(());
         }
 
         band_count += 1;
@@ -546,6 +546,22 @@ fn validate_lerc_layout(
     index: usize,
 ) -> Result<()> {
     let expected_type = expected_lerc_data_type(layout)?;
+    let band_count = decoded.info.band_count();
+    if band_count == 0 {
+        return Err(Error::DecompressionFailed {
+            index,
+            reason: "LERC band set must contain at least one band".into(),
+        });
+    }
+    if decoded.bands.len() != band_count {
+        return Err(Error::DecompressionFailed {
+            index,
+            reason: format!(
+                "LERC decoded band payload count {} does not match metadata band count {band_count}",
+                decoded.bands.len()
+            ),
+        });
+    }
     for band in &decoded.info.bands {
         if band.width as usize != block_width || band.height as usize != block_height {
             return Err(Error::DecompressionFailed {
@@ -574,7 +590,6 @@ fn validate_lerc_layout(
     } else {
         1
     };
-    let band_count = decoded.info.band_count();
     let depth = decoded.info.depth().max(1) as usize;
     if !((band_count == 1 && depth == expected_samples)
         || (depth == 1 && band_count == expected_samples))
@@ -735,7 +750,7 @@ where
                 ),
             });
         }
-        let mask = decoded.band_masks.first().and_then(|mask| mask.as_deref());
+        let mask = decoded_band_mask(decoded, 0, plan.pixel_count, plan.index)?;
         for pixel in 0..plan.pixel_count {
             let valid = mask.map(|mask| mask[pixel] != 0).unwrap_or(true);
             let base = pixel * plan.depth;
@@ -772,11 +787,13 @@ where
             });
         }
     }
+    let band_masks = (0..band_slices.len())
+        .map(|band_index| decoded_band_mask(decoded, band_index, plan.pixel_count, plan.index))
+        .collect::<Result<Vec<_>>>()?;
 
     for pixel in 0..plan.pixel_count {
         for (band_index, values) in band_slices.iter().enumerate() {
-            let valid = decoded.band_masks[band_index]
-                .as_deref()
+            let valid = band_masks[band_index]
                 .map(|mask| mask[pixel] != 0)
                 .unwrap_or(true);
             if valid {
@@ -788,6 +805,31 @@ where
     }
 
     Ok(())
+}
+
+fn decoded_band_mask(
+    decoded: &DecodedBandSet,
+    band_index: usize,
+    pixel_count: usize,
+    index: usize,
+) -> Result<Option<&[u8]>> {
+    let Some(mask) = decoded
+        .band_masks
+        .get(band_index)
+        .and_then(|mask| mask.as_deref())
+    else {
+        return Ok(None);
+    };
+    if mask.len() != pixel_count {
+        return Err(Error::DecompressionFailed {
+            index,
+            reason: format!(
+                "LERC mask length {} does not match block pixel count {pixel_count}",
+                mask.len()
+            ),
+        });
+    }
+    Ok(Some(mask))
 }
 
 trait NativeEndianBytes: Copy {

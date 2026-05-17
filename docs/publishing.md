@@ -11,12 +11,29 @@ versions:
 5. `geotiff-reader`
 6. `geotiff-writer`
 
-Run the release checks before publishing:
+Run the same local release checks before publishing:
 
 ```sh
-cargo test --workspace --all-features
+cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+cargo test -p tiff-reader --no-default-features
+cargo test -p tiff-writer --no-default-features
+cargo test -p geotiff-reader --no-default-features
+cargo test -p geotiff-reader --no-default-features --features cog
 cargo doc --workspace --all-features --no-deps
+./scripts/fetch-interoperability-corpus.sh --verify-only
+./scripts/run-reference-parity.sh
+./scripts/seed-fuzz-corpus.sh
+git diff --exit-code -- fuzz/corpus
+git status --short -- fuzz/corpus
+cargo check --manifest-path fuzz/Cargo.toml --bins
+cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings
+(
+  cd fuzz
+  cargo fuzz run tiff_open corpus/tiff_open -- -max_total_time=60
+  cargo fuzz run geotiff_open corpus/geotiff_open -- -max_total_time=60
+)
 cargo package -p tiff-core
 cargo package -p geotiff-core
 ```
