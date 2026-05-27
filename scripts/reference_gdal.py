@@ -10,6 +10,15 @@ from osgeo import gdal
 from osgeo import osr
 
 
+ERROR_CLASS_NAMES = {
+    getattr(gdal, "CE_None", 0): "none",
+    getattr(gdal, "CE_Debug", 1): "debug",
+    getattr(gdal, "CE_Warning", 2): "warning",
+    getattr(gdal, "CE_Failure", 3): "failure",
+    getattr(gdal, "CE_Fatal", 4): "fatal",
+}
+
+
 def fnv1a64(data: bytes) -> str:
     hash_value = 0xCBF29CE484222325
     for byte in data:
@@ -127,6 +136,51 @@ def command_bytes(args):
     sys.stdout.buffer.write(data)
 
 
+def command_diagnostics(args):
+    gdal.UseExceptions()
+    errors = []
+
+    def error_handler(error_class, error_number, message):
+        errors.append(
+            {
+                "class": int(error_class),
+                "class_name": ERROR_CLASS_NAMES.get(error_class, "unknown"),
+                "number": int(error_number),
+                "message": str(message),
+            }
+        )
+
+    gdal.PushErrorHandler(error_handler)
+    try:
+        dataset = gdal.Open(args.path, gdal.GA_ReadOnly)
+        if dataset is None:
+            raise SystemExit(f"failed to open dataset: {args.path}")
+        data, width, height, data_type = interleaved_bytes(dataset, args.overview)
+    finally:
+        gdal.PopErrorHandler()
+
+    payload = {
+        "width": width,
+        "height": height,
+        "band_count": dataset.RasterCount,
+        "data_type": gdal.GetDataTypeName(data_type),
+        "byte_len": len(data),
+        "hash": fnv1a64(data),
+        "errors": errors,
+    }
+    print(json.dumps(payload))
+
+
+def command_capabilities(_args):
+    gtiff = gdal.GetDriverByName("GTiff")
+    creation_options = gtiff.GetMetadataItem("DMD_CREATIONOPTIONLIST") if gtiff else ""
+    payload = {
+        "gdal_release_name": gdal.VersionInfo("RELEASE_NAME"),
+        "gtiff_supports_lerc": "LERC" in (creation_options or ""),
+    }
+    print(json.dumps(payload))
+
+
 def command_benchmark(args):
     timings = []
     hashes = set()
@@ -172,6 +226,14 @@ def build_parser():
     bytes_parser.add_argument("path")
     bytes_parser.add_argument("--overview", type=int, default=None)
     bytes_parser.set_defaults(func=command_bytes)
+
+    diagnostics = subparsers.add_parser("diagnostics")
+    diagnostics.add_argument("path")
+    diagnostics.add_argument("--overview", type=int, default=None)
+    diagnostics.set_defaults(func=command_diagnostics)
+
+    capabilities = subparsers.add_parser("capabilities")
+    capabilities.set_defaults(func=command_capabilities)
 
     benchmark = subparsers.add_parser("benchmark")
     benchmark.add_argument("path")

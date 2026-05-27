@@ -3,9 +3,11 @@ use std::io::BufWriter;
 
 use ndarray::ArrayD;
 use tempfile::NamedTempFile;
-use tiff_core::{Compression, PhotometricInterpretation, PlanarConfiguration};
+use tiff_core::{
+    Compression, LercAdditionalCompression, PhotometricInterpretation, PlanarConfiguration,
+};
 use tiff_reader::TiffFile;
-use tiff_writer::{ImageBuilder, JpegOptions, TiffWriter, WriteOptions};
+use tiff_writer::{ImageBuilder, JpegOptions, LercOptions, TiffWriter, WriteOptions};
 
 #[path = "../../../test-support/reference.rs"]
 mod reference;
@@ -269,6 +271,33 @@ fn write_generated_jpeg_fixture(path: &std::path::Path) {
     tiff_writer.finish().unwrap();
 }
 
+fn write_generated_lerc_fixture(path: &std::path::Path) {
+    let width = 16u32;
+    let height = 16u32;
+    let tile = 16u32;
+
+    let mut data = vec![0u8; (tile * tile) as usize];
+    for row in 0..height as usize {
+        for col in 0..width as usize {
+            data[row * tile as usize + col] = ((row * 17 + col * 9) % 251) as u8;
+        }
+    }
+
+    let file = File::create(path).unwrap();
+    let writer = BufWriter::new(file);
+    let mut tiff_writer = TiffWriter::new(writer, WriteOptions::default()).unwrap();
+    let image = ImageBuilder::new(width, height)
+        .sample_type::<u8>()
+        .lerc_options(LercOptions {
+            max_z_error: 0.0,
+            additional_compression: LercAdditionalCompression::None,
+        })
+        .tiles(tile, tile);
+    let handle = tiff_writer.add_image(image).unwrap();
+    tiff_writer.write_block(&handle, 0, &data).unwrap();
+    tiff_writer.finish().unwrap();
+}
+
 #[test]
 fn matches_libtiff_directory_layout_for_interoperability_corpus() {
     if !reference::tiffdump_available() {
@@ -417,6 +446,46 @@ fn matches_gdal_for_generated_jpeg_tiff() {
     assert!(ifd.tag(tiff_core::TAG_JPEG_TABLES).is_none());
 
     assert_gdal_u8_pixels_close_with_tolerance(fixture.path(), 0, 6, 256);
+}
+
+#[test]
+fn gdal_reads_generated_lerc_tiff_without_version_warnings() {
+    if !reference::python_gdal_available() {
+        eprintln!("skipping GDAL LERC warning test because Python GDAL bindings are unavailable");
+        return;
+    }
+
+    let capabilities = reference::run_reference_json(env!("CARGO_MANIFEST_DIR"), &["capabilities"]);
+    if !capabilities["gtiff_supports_lerc"]
+        .as_bool()
+        .unwrap_or(false)
+    {
+        eprintln!("skipping GDAL LERC warning test because GTiff LERC support is unavailable");
+        return;
+    }
+
+    let fixture = NamedTempFile::new().unwrap();
+    write_generated_lerc_fixture(fixture.path());
+
+    let path_str = fixture.path().to_str().unwrap();
+    let diagnostics =
+        reference::run_reference_json(env!("CARGO_MANIFEST_DIR"), &["diagnostics", path_str]);
+    let errors = diagnostics["errors"].as_array().unwrap();
+    let lerc_version_messages: Vec<&str> = errors
+        .iter()
+        .filter_map(|error| error["message"].as_str())
+        .filter(|message| {
+            message.contains("Unknown Lerc version")
+                || message.contains("Unexpected version number")
+                || message.contains("LERCPreDecode")
+        })
+        .collect();
+
+    assert!(
+        lerc_version_messages.is_empty(),
+        "GDAL emitted LERC version warnings for generated TIFF: {lerc_version_messages:?}"
+    );
+    assert_gdal_hash_matches(fixture.path(), 0, SampleKind::U8);
 }
 
 #[test]

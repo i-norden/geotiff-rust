@@ -1,8 +1,10 @@
 use std::fmt::Debug;
 use std::io::Cursor;
 
+use tiff_core::TagValue;
 use tiff_core::{
     ColorMap, ColorModel, Compression, ExtraSample, InkSet, Predictor, YCbCrPositioning,
+    LERC_VERSION_2_4,
 };
 use tiff_reader::{TiffFile, TiffSample};
 use tiff_writer::{
@@ -497,7 +499,8 @@ fn lerc_roundtrip_and_builder_state_behave_consistently() {
     let ib = ImageBuilder::new(4, 4)
         .sample_type::<u8>()
         .compression(Compression::Lerc);
-    assert!(ib.lerc_parameters_tag().is_some());
+    let tag = ib.lerc_parameters_tag().unwrap();
+    assert_eq!(tag.value, TagValue::Long(vec![LERC_VERSION_2_4, 0]));
 }
 
 #[test]

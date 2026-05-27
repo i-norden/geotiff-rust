@@ -445,7 +445,10 @@ impl ImageBuilder {
         let opts = self.lerc_options.unwrap_or_default();
         Some(Tag::new(
             TAG_LERC_PARAMETERS,
-            TagValue::Long(vec![2, opts.additional_compression.to_code()]),
+            TagValue::Long(vec![
+                LERC_VERSION_2_4,
+                opts.additional_compression.to_code(),
+            ]),
         ))
     }
 
