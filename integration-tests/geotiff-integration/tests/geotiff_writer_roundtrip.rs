@@ -172,7 +172,7 @@ fn writer_emits_minimal_geokey_directory_for_transform_only_metadata() {
         .tag(TAG_GEO_KEY_DIRECTORY)
         .and_then(|tag| tag.value.as_u16_slice())
         .unwrap();
-    assert_eq!(directory, &[1, 1, 0, 0]);
+    assert_eq!(directory, &[1, 1, 1, 0]);
 
     let geo = GeoTiffFile::from_bytes(bytes).unwrap();
     assert_eq!(geo.epsg(), None);
@@ -479,7 +479,17 @@ fn compound_vertical_crs_roundtrips_through_reader_metadata() {
         .write_2d_to(&mut buf, data.view())
         .unwrap();
 
-    let geo = GeoTiffFile::from_bytes(buf.into_inner()).unwrap();
+    let bytes = buf.into_inner();
+    let tiff = TiffFile::from_bytes(bytes.clone()).unwrap();
+    let directory = tiff
+        .ifd(0)
+        .unwrap()
+        .tag(TAG_GEO_KEY_DIRECTORY)
+        .and_then(|tag| tag.value.as_u16_slice())
+        .unwrap();
+    assert_eq!(directory[..4], [1, 1, 1, 6]);
+
+    let geo = GeoTiffFile::from_bytes(bytes).unwrap();
     assert_eq!(geo.epsg(), Some(26916));
     assert_eq!(geo.crs().projected_epsg(), Some(26916));
     assert_eq!(geo.crs().vertical_epsg(), Some(5703));

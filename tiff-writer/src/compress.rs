@@ -8,7 +8,7 @@
 
 use crate::builder::{JpegOptions, LercOptions};
 use crate::error::{Error, Result};
-use tiff_core::{ByteOrder, Compression, Predictor};
+use tiff_core::{ByteOrder, Compression, Predictor, LERC_VERSION_2_4};
 
 use crate::sample::TiffWriteSample;
 
@@ -188,6 +188,7 @@ pub fn compress_block_lerc<T: TiffWriteSample>(
         options.max_z_error,
         index,
     )?;
+    validate_tiff_lerc_version(&blob, index)?;
 
     match options.additional_compression {
         tiff_core::LercAdditionalCompression::None => Ok(blob),
@@ -235,6 +236,29 @@ pub(crate) fn lerc_encode<T: lerc_core::Sample>(
         index,
         reason: format!("LERC encode: {e}"),
     })
+}
+
+fn validate_tiff_lerc_version(blob: &[u8], index: usize) -> Result<()> {
+    let Some(version_bytes) = blob.get(6..10) else {
+        return Err(Error::CompressionFailed {
+            index,
+            reason: "LERC encode produced a blob without a Lerc2 version header".into(),
+        });
+    };
+    let version = i32::from_le_bytes(
+        version_bytes
+            .try_into()
+            .expect("slice length checked by blob.get(6..10)"),
+    );
+    if version != LERC_VERSION_2_4 as i32 {
+        return Err(Error::CompressionFailed {
+            index,
+            reason: format!(
+                "LERC2 version {version} is not supported by TIFF LERC_PARAMETERS; expected version {LERC_VERSION_2_4}"
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Apply forward predictor to a row of file-order bytes (in-place).
