@@ -33,11 +33,17 @@ pub const VERTICAL_DATUM: u16 = 4098;
 pub const VERTICAL_UNITS: u16 = 4099;
 const GEO_DOUBLE_PARAMS_TAG: u16 = 34736;
 const GEO_ASCII_PARAMS_TAG: u16 = 34737;
+pub const GEO_KEY_DIRECTORY_VERSION: u16 = 1;
+pub const GEO_KEY_REVISION: u16 = 1;
+pub const GEO_KEY_MINOR_REVISION_1_0: u16 = 0;
+pub const GEO_KEY_MINOR_REVISION_1_1: u16 = 1;
 
 /// Error returned when a GeoKey directory cannot be represented in the
 /// GeoTIFF SHORT-based key directory format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GeoKeySerializeError {
+    /// The GeoKey directory minor revision must be 0 or 1.
+    InvalidMinorRevision { minor_revision: u16 },
     /// The GeoKey directory header stores the key count as a SHORT.
     TooManyKeys { count: usize },
     /// A key references more parameter values than fit in a SHORT count.
@@ -53,6 +59,10 @@ pub enum GeoKeySerializeError {
 impl fmt::Display for GeoKeySerializeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidMinorRevision { minor_revision } => write!(
+                f,
+                "GeoKey directory minor revision {minor_revision} is invalid; expected 0 or 1"
+            ),
             Self::TooManyKeys { count } => {
                 write!(
                     f,
@@ -105,12 +115,12 @@ pub struct GeoKeyDirectory {
 }
 
 impl GeoKeyDirectory {
-    /// Create an empty directory with default version (1.1.0).
+    /// Create an empty directory with a GeoTIFF 1.1 writer header.
     pub fn new() -> Self {
         Self {
-            version: 1,
-            major_revision: 1,
-            minor_revision: 0,
+            version: GEO_KEY_DIRECTORY_VERSION,
+            major_revision: GEO_KEY_REVISION,
+            minor_revision: GEO_KEY_MINOR_REVISION_1_1,
             keys: Vec::new(),
         }
     }
@@ -243,10 +253,12 @@ impl GeoKeyDirectory {
         let mut double_params = Vec::new();
         let mut ascii_params = String::new();
 
+        let minor_revision = self.serialized_minor_revision()?;
+
         // Header: version, major_revision, minor_revision, num_keys
         directory.push(self.version);
         directory.push(self.major_revision);
-        directory.push(self.minor_revision);
+        directory.push(minor_revision);
         directory.push(key_count);
 
         for key in &sorted_keys {
@@ -281,6 +293,25 @@ impl GeoKeyDirectory {
         }
 
         Ok((directory, double_params, ascii_params))
+    }
+
+    fn serialized_minor_revision(&self) -> Result<u16, GeoKeySerializeError> {
+        match self.minor_revision {
+            GEO_KEY_MINOR_REVISION_1_0 if self.requires_geotiff_1_1() => {
+                Ok(GEO_KEY_MINOR_REVISION_1_1)
+            }
+            GEO_KEY_MINOR_REVISION_1_0 | GEO_KEY_MINOR_REVISION_1_1 => Ok(self.minor_revision),
+            minor_revision => Err(GeoKeySerializeError::InvalidMinorRevision { minor_revision }),
+        }
+    }
+
+    fn requires_geotiff_1_1(&self) -> bool {
+        self.keys.iter().any(|key| {
+            matches!(
+                key.id,
+                VERTICAL_CS_TYPE | VERTICAL_CITATION | VERTICAL_DATUM | VERTICAL_UNITS
+            )
+        })
     }
 }
 
@@ -318,11 +349,44 @@ mod tests {
         dir.set(GEOG_CITATION, GeoKeyValue::Ascii("WGS 84".into()));
 
         let (shorts, doubles, ascii) = dir.serialize().unwrap();
+        assert_eq!(shorts[..4], [1, 1, 1, 3]);
         let parsed = GeoKeyDirectory::parse(&shorts, &doubles, &ascii).unwrap();
 
         assert_eq!(parsed.get_short(GT_MODEL_TYPE), Some(2));
         assert_eq!(parsed.get_short(GEOGRAPHIC_TYPE), Some(4326));
         assert_eq!(parsed.get_ascii(GEOG_CITATION), Some("WGS 84"));
+    }
+
+    #[test]
+    fn serialize_preserves_legacy_minor_revision_zero_when_compatible() {
+        let mut dir = GeoKeyDirectory::new();
+        dir.minor_revision = GEO_KEY_MINOR_REVISION_1_0;
+        dir.set(GT_MODEL_TYPE, GeoKeyValue::Short(2));
+
+        let (shorts, _, _) = dir.serialize().unwrap();
+        assert_eq!(shorts[..4], [1, 1, 0, 1]);
+    }
+
+    #[test]
+    fn serialize_promotes_vertical_geokeys_to_geotiff_1_1_minor_revision() {
+        let mut dir = GeoKeyDirectory::new();
+        dir.minor_revision = GEO_KEY_MINOR_REVISION_1_0;
+        dir.set(VERTICAL_CS_TYPE, GeoKeyValue::Short(5703));
+
+        let (shorts, _, _) = dir.serialize().unwrap();
+        assert_eq!(shorts[..4], [1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn serialize_rejects_invalid_minor_revision() {
+        let mut dir = GeoKeyDirectory::new();
+        dir.minor_revision = 2;
+
+        let err = dir.serialize().unwrap_err();
+        assert_eq!(
+            err,
+            GeoKeySerializeError::InvalidMinorRevision { minor_revision: 2 }
+        );
     }
 
     #[test]

@@ -1,8 +1,10 @@
 use std::fmt::Debug;
 use std::io::Cursor;
 
+use tiff_core::TagValue;
 use tiff_core::{
     ColorMap, ColorModel, Compression, ExtraSample, InkSet, Predictor, YCbCrPositioning,
+    LERC_VERSION_2_4,
 };
 use tiff_reader::{TiffFile, TiffSample};
 use tiff_writer::{
@@ -497,7 +499,39 @@ fn lerc_roundtrip_and_builder_state_behave_consistently() {
     let ib = ImageBuilder::new(4, 4)
         .sample_type::<u8>()
         .compression(Compression::Lerc);
-    assert!(ib.lerc_parameters_tag().is_some());
+    let tag = ib.lerc_parameters_tag().unwrap();
+    assert_eq!(tag.value, TagValue::Long(vec![LERC_VERSION_2_4, 0]));
+}
+
+#[test]
+fn lerc_write_rejects_gdal_incompatible_lerc2_versions() {
+    let width = 64u32;
+    let height = 64u32;
+    let mut data = Vec::with_capacity((width * height * 3) as usize);
+    for row in 0..height {
+        for col in 0..width {
+            let value = ((row * 17 + col * 97 + row * col * 13) % 251) as u8;
+            data.extend_from_slice(&[value, value.wrapping_add(1), value.wrapping_add(2)]);
+        }
+    }
+
+    let mut buf = Cursor::new(Vec::new());
+    let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
+    let image = ImageBuilder::new(width, height)
+        .sample_type::<u8>()
+        .samples_per_pixel(3)
+        .photometric(tiff_core::PhotometricInterpretation::Rgb)
+        .lerc_options(LercOptions {
+            max_z_error: 0.5,
+            additional_compression: tiff_core::LercAdditionalCompression::None,
+        })
+        .tiles(width, height);
+    let handle = writer.add_image(image).unwrap();
+
+    let err = writer.write_block(&handle, 0, &data).unwrap_err();
+    assert!(
+        matches!(err, tiff_writer::Error::CompressionFailed { reason, .. } if reason.contains("LERC2 version 5"))
+    );
 }
 
 #[test]

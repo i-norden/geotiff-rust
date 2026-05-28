@@ -27,6 +27,11 @@ pub const TAG_YCBCR_POSITIONING: u16 = 531;
 pub const TAG_REFERENCE_BLACK_WHITE: u16 = 532;
 pub const TAG_LERC_PARAMETERS: u16 = 50674;
 
+/// TIFF-side LERC version value stored in `TAG_LERC_PARAMETERS`.
+///
+/// This matches libtiff/GDAL's `LERC_VERSION_2_4` value.
+pub const LERC_VERSION_2_4: u32 = 4;
+
 /// TIFF compression scheme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Compression {
