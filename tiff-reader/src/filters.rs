@@ -538,7 +538,7 @@ mod tests {
 
     #[test]
     fn deflate_decoder_rejects_blocks_that_exceed_budget() {
-        let payload = vec![0x2a; 128];
+        let payload = [0x2a; 128];
         let mut encoder =
             flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(&payload).unwrap();
@@ -551,7 +551,7 @@ mod tests {
 
     #[test]
     fn lzw_decoder_rejects_blocks_that_exceed_budget() {
-        let payload = vec![0x2a; 128];
+        let payload = [0x2a; 128];
         let compressed = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
             .encode(&payload)
             .unwrap();
@@ -582,7 +582,7 @@ mod tests {
     #[cfg(feature = "zstd")]
     #[test]
     fn zstd_decoder_rejects_blocks_that_exceed_budget() {
-        let payload = vec![0x2a; 128];
+        let payload = [0x2a; 128];
         let compressed = zstd::stream::encode_all(&payload[..], 0).unwrap();
 
         let err = decompress(Compression::Zstd.to_code(), &compressed, 0, None, 127).unwrap_err();
