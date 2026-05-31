@@ -308,6 +308,7 @@ fn expand_subsampled_ycbcr(
 }
 
 fn decode_lerc_block(request: BlockDecodeRequest<'_>, expected_len: usize) -> Result<Vec<u8>> {
+    let lerc_payload_len_limit = expected_lerc_payload_len_limit(&request, expected_len)?;
     let payload = match request
         .ifd
         .lerc_parameters()?
@@ -320,14 +321,14 @@ fn decode_lerc_block(request: BlockDecodeRequest<'_>, expected_len: usize) -> Re
             request.compressed,
             request.index,
             None,
-            expected_len,
+            lerc_payload_len_limit,
         )?,
         LercAdditionalCompression::Zstd => filters::decompress(
             Compression::Zstd.to_code(),
             request.compressed,
             request.index,
             None,
-            expected_len,
+            lerc_payload_len_limit,
         )?,
     };
 
@@ -351,6 +352,37 @@ fn decode_lerc_block(request: BlockDecodeRequest<'_>, expected_len: usize) -> Re
         request.index,
     )?;
     serialize_lerc_band_set(&decoded, request.layout, expected_len, request.index)
+}
+
+fn expected_lerc_payload_len_limit(
+    request: &BlockDecodeRequest<'_>,
+    expected_len: usize,
+) -> Result<usize> {
+    let samples = if request.layout.planar_configuration == 1 {
+        request.layout.samples_per_pixel
+    } else {
+        1
+    };
+    let pixel_count = request
+        .block_width
+        .checked_mul(request.block_height)
+        .ok_or_else(|| {
+            Error::InvalidImageLayout("LERC block pixel count overflows usize".into())
+        })?;
+    let sample_count = pixel_count
+        .checked_mul(samples)
+        .ok_or_else(|| Error::InvalidImageLayout("LERC sample count overflows usize".into()))?;
+
+    // LERC additional compression inflates to the LERC container, not directly
+    // to pixels. Allow headers, masks, and block metadata while keeping a finite
+    // decompression ceiling before LERC header validation runs.
+    let raw_payload_budget = expected_len
+        .checked_mul(4)
+        .and_then(|value| value.checked_add(sample_count))
+        .and_then(|value| value.checked_add(samples.saturating_mul(1024)))
+        .and_then(|value| value.checked_add(4096))
+        .ok_or_else(|| Error::InvalidImageLayout("LERC payload budget overflows usize".into()))?;
+    Ok(raw_payload_budget.max(expected_len))
 }
 
 fn validate_lerc_payload_before_decode(

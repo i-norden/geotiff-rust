@@ -16,24 +16,26 @@ pub fn decompress(
     data: &[u8],
     index: usize,
     _jpeg_tables: Option<&[u8]>,
-    _decoded_len_limit: usize,
+    decoded_len_limit: usize,
 ) -> Result<Vec<u8>> {
     match Compression::from_code(compression) {
         Some(Compression::None) => Ok(data.to_vec()),
-        Some(Compression::Deflate | Compression::DeflateOld) => decompress_deflate(data, index),
-        Some(Compression::Lzw) => decompress_lzw(data, index),
-        Some(Compression::PackBits) => decompress_packbits(data, index),
+        Some(Compression::Deflate | Compression::DeflateOld) => {
+            decompress_deflate(data, index, decoded_len_limit)
+        }
+        Some(Compression::Lzw) => decompress_lzw(data, index, decoded_len_limit),
+        Some(Compression::PackBits) => decompress_packbits(data, index, decoded_len_limit),
         Some(Compression::Lerc) => Err(Error::UnsupportedCompression(compression)),
         #[cfg(feature = "jpeg")]
         Some(Compression::OldJpeg) => Err(Error::UnsupportedCompression(compression)),
         #[cfg(feature = "jpeg")]
-        Some(Compression::Jpeg) => decompress_jpeg(data, index, _jpeg_tables, _decoded_len_limit),
+        Some(Compression::Jpeg) => decompress_jpeg(data, index, _jpeg_tables, decoded_len_limit),
         #[cfg(not(feature = "jpeg"))]
         Some(Compression::OldJpeg | Compression::Jpeg) => {
             Err(Error::UnsupportedCompression(compression))
         }
         #[cfg(feature = "zstd")]
-        Some(Compression::Zstd) => decompress_zstd(data, index),
+        Some(Compression::Zstd) => decompress_zstd(data, index, decoded_len_limit),
         #[cfg(not(feature = "zstd"))]
         Some(Compression::Zstd) => Err(Error::UnsupportedCompression(compression)),
         None => Err(Error::UnsupportedCompression(compression)),
@@ -80,34 +82,70 @@ pub fn fix_endianness_and_predict(
     }
 }
 
-fn decompress_deflate(data: &[u8], index: usize) -> Result<Vec<u8>> {
+fn decompress_deflate(data: &[u8], index: usize, decoded_len_limit: usize) -> Result<Vec<u8>> {
     use flate2::read::ZlibDecoder;
 
-    let mut decoder = ZlibDecoder::new(data);
-    let mut out = Vec::new();
-    decoder
-        .read_to_end(&mut out)
-        .map_err(|e| Error::DecompressionFailed {
-            index,
-            reason: format!("deflate: {e}"),
-        })?;
-    Ok(out)
+    let decoder = ZlibDecoder::new(data);
+    read_bounded_to_end(decoder, index, "deflate", decoded_len_limit)
 }
 
-fn decompress_lzw(data: &[u8], index: usize) -> Result<Vec<u8>> {
-    use weezl::decode::Decoder;
-    use weezl::BitOrder;
+fn decompress_lzw(data: &[u8], index: usize, decoded_len_limit: usize) -> Result<Vec<u8>> {
+    use weezl::decode::Configuration;
+    use weezl::{BitOrder, LzwStatus};
 
-    let mut decoder = Decoder::with_tiff_size_switch(BitOrder::Msb, 8);
-    decoder
-        .decode(data)
-        .map_err(|e| Error::DecompressionFailed {
-            index,
-            reason: format!("LZW: {e}"),
-        })
+    let mut decoder = Configuration::with_tiff_size_switch(BitOrder::Msb, 8)
+        .with_yield_on_full_buffer(true)
+        .build();
+    let probe_limit = decoded_len_probe_limit(index, "LZW", decoded_len_limit)?;
+    let mut out = Vec::with_capacity(decoded_len_limit.min(8192));
+    let mut input_offset = 0usize;
+    let mut scratch = [0u8; 8192];
+
+    loop {
+        let remaining = probe_limit.saturating_sub(out.len());
+        if remaining == 0 {
+            return Err(decoded_block_too_large(index, "LZW", decoded_len_limit));
+        }
+
+        let output_len = remaining.min(scratch.len());
+        let result = decoder.decode_bytes(&data[input_offset..], &mut scratch[..output_len]);
+        input_offset += result.consumed_in;
+        out.extend_from_slice(&scratch[..result.consumed_out]);
+        if out.len() > decoded_len_limit {
+            return Err(decoded_block_too_large(index, "LZW", decoded_len_limit));
+        }
+
+        match result.status {
+            Err(e) => {
+                return Err(Error::DecompressionFailed {
+                    index,
+                    reason: format!("LZW: {e}"),
+                })
+            }
+            Ok(LzwStatus::Done) => return Ok(out),
+            Ok(LzwStatus::Ok) => {
+                if result.consumed_in == 0 && result.consumed_out == 0 {
+                    return Err(Error::DecompressionFailed {
+                        index,
+                        reason: "LZW: decoder made no progress".into(),
+                    });
+                }
+            }
+            Ok(LzwStatus::NoProgress) => {
+                if result.consumed_out == output_len {
+                    continue;
+                }
+                return Err(Error::DecompressionFailed {
+                    index,
+                    reason: "LZW: stream ended before end marker".into(),
+                });
+            }
+        }
+    }
 }
 
-fn decompress_packbits(data: &[u8], index: usize) -> Result<Vec<u8>> {
+fn decompress_packbits(data: &[u8], index: usize, decoded_len_limit: usize) -> Result<Vec<u8>> {
+    let probe_limit = decoded_len_probe_limit(index, "PackBits", decoded_len_limit)?;
     let mut out = Vec::new();
     let mut cursor = 0usize;
 
@@ -124,7 +162,14 @@ fn decompress_packbits(data: &[u8], index: usize) -> Result<Vec<u8>> {
                     reason: "PackBits literal run is truncated".into(),
                 });
             }
-            out.extend_from_slice(&data[cursor..end]);
+            append_bounded_bytes(
+                &mut out,
+                &data[cursor..end],
+                index,
+                "PackBits",
+                decoded_len_limit,
+                probe_limit,
+            )?;
             cursor = end;
         } else if header != -128 {
             if cursor >= data.len() {
@@ -136,7 +181,15 @@ fn decompress_packbits(data: &[u8], index: usize) -> Result<Vec<u8>> {
             let count = (1i16 - header as i16) as usize;
             let byte = data[cursor];
             cursor += 1;
-            out.resize(out.len() + count, byte);
+            append_bounded_repeat(
+                &mut out,
+                byte,
+                count,
+                index,
+                "PackBits",
+                decoded_len_limit,
+                probe_limit,
+            )?;
         }
     }
 
@@ -192,11 +245,105 @@ fn validate_jpeg_metadata_budget<R: std::io::Read>(
 }
 
 #[cfg(feature = "zstd")]
-fn decompress_zstd(data: &[u8], index: usize) -> Result<Vec<u8>> {
-    zstd::stream::decode_all(Cursor::new(data)).map_err(|e| Error::DecompressionFailed {
+fn decompress_zstd(data: &[u8], index: usize, decoded_len_limit: usize) -> Result<Vec<u8>> {
+    let decoder = zstd::stream::read::Decoder::new(Cursor::new(data)).map_err(|e| {
+        Error::DecompressionFailed {
+            index,
+            reason: format!("ZSTD: {e}"),
+        }
+    })?;
+    read_bounded_to_end(decoder, index, "ZSTD", decoded_len_limit)
+}
+
+fn read_bounded_to_end<R: Read>(
+    reader: R,
+    index: usize,
+    codec: &'static str,
+    decoded_len_limit: usize,
+) -> Result<Vec<u8>> {
+    let probe_limit = decoded_len_probe_limit(index, codec, decoded_len_limit)?;
+    let mut reader = reader.take(probe_limit as u64);
+    let mut out = Vec::with_capacity(decoded_len_limit.min(8192));
+    let mut scratch = [0u8; 8192];
+
+    loop {
+        let remaining = probe_limit.saturating_sub(out.len());
+        if remaining == 0 {
+            break;
+        }
+        let read_len = remaining.min(scratch.len());
+        let bytes_read =
+            reader
+                .read(&mut scratch[..read_len])
+                .map_err(|e| Error::DecompressionFailed {
+                    index,
+                    reason: format!("{codec}: {e}"),
+                })?;
+        if bytes_read == 0 {
+            break;
+        }
+        out.extend_from_slice(&scratch[..bytes_read]);
+        if out.len() > decoded_len_limit {
+            return Err(decoded_block_too_large(index, codec, decoded_len_limit));
+        }
+    }
+
+    Ok(out)
+}
+
+fn decoded_len_probe_limit(
+    index: usize,
+    codec: &'static str,
+    decoded_len_limit: usize,
+) -> Result<usize> {
+    decoded_len_limit
+        .checked_add(1)
+        .ok_or_else(|| Error::DecompressionFailed {
+            index,
+            reason: format!("{codec}: TIFF block budget is too large to probe safely"),
+        })
+}
+
+fn decoded_block_too_large(index: usize, codec: &'static str, decoded_len_limit: usize) -> Error {
+    Error::DecompressionFailed {
         index,
-        reason: format!("ZSTD: {e}"),
-    })
+        reason: format!("{codec}: decoded block exceeds TIFF block budget {decoded_len_limit}"),
+    }
+}
+
+fn append_bounded_bytes(
+    out: &mut Vec<u8>,
+    bytes: &[u8],
+    index: usize,
+    codec: &'static str,
+    decoded_len_limit: usize,
+    probe_limit: usize,
+) -> Result<()> {
+    let remaining = probe_limit.saturating_sub(out.len());
+    let copy_len = bytes.len().min(remaining);
+    out.extend_from_slice(&bytes[..copy_len]);
+    if copy_len < bytes.len() || out.len() > decoded_len_limit {
+        return Err(decoded_block_too_large(index, codec, decoded_len_limit));
+    }
+    Ok(())
+}
+
+fn append_bounded_repeat(
+    out: &mut Vec<u8>,
+    byte: u8,
+    count: usize,
+    index: usize,
+    codec: &'static str,
+    decoded_len_limit: usize,
+    probe_limit: usize,
+) -> Result<()> {
+    let remaining = probe_limit.saturating_sub(out.len());
+    let copy_len = count.min(remaining);
+    out.resize(out.len() + copy_len, byte);
+    if copy_len < count || out.len() > decoded_len_limit {
+        return Err(decoded_block_too_large(index, codec, decoded_len_limit));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "jpeg")]
@@ -367,11 +514,13 @@ fn predict_f64(input: &mut [u8], output: &mut [u8], samples: u16) {
 mod tests {
     use std::path::Path;
 
+    #[cfg(not(feature = "jpeg"))]
+    use super::decompress;
     #[cfg(feature = "jpeg")]
     use super::{decompress, merge_jpeg_stream};
     use super::{decompress_lzw, decompress_packbits, fix_endianness_and_predict};
     use crate::header::ByteOrder;
-    #[cfg(feature = "jpeg")]
+    use std::io::Write;
     use tiff_core::Compression;
 
     #[test]
@@ -383,8 +532,38 @@ mod tests {
 
     #[test]
     fn packbits_decoder_rejects_truncated_repeat_run() {
-        let err = decompress_packbits(&[0xff], 0).unwrap_err();
+        let err = decompress_packbits(&[0xff], 0, 1).unwrap_err();
         assert!(err.to_string().contains("PackBits"));
+    }
+
+    #[test]
+    fn deflate_decoder_rejects_blocks_that_exceed_budget() {
+        let payload = [0x2a; 128];
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&payload).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let err =
+            decompress(Compression::Deflate.to_code(), &compressed, 0, None, 127).unwrap_err();
+        assert!(err.to_string().contains("block budget"));
+    }
+
+    #[test]
+    fn lzw_decoder_rejects_blocks_that_exceed_budget() {
+        let payload = [0x2a; 128];
+        let compressed = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
+            .encode(&payload)
+            .unwrap();
+
+        let err = decompress_lzw(&compressed, 0, 127).unwrap_err();
+        assert!(err.to_string().contains("block budget"));
+    }
+
+    #[test]
+    fn packbits_decoder_rejects_blocks_that_exceed_budget() {
+        let err = decompress_packbits(&[0x81, 0x2a], 0, 127).unwrap_err();
+        assert!(err.to_string().contains("block budget"));
     }
 
     #[test]
@@ -396,8 +575,18 @@ mod tests {
         let without_trailer = &bytes[570..570 + 1223];
         let with_trailer = &bytes[570..570 + 1227];
 
-        assert!(decompress_lzw(without_trailer, 0).is_ok());
-        assert!(decompress_lzw(with_trailer, 0).is_ok());
+        assert!(decompress_lzw(without_trailer, 0, 1_000_000).is_ok());
+        assert!(decompress_lzw(with_trailer, 0, 1_000_000).is_ok());
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn zstd_decoder_rejects_blocks_that_exceed_budget() {
+        let payload = [0x2a; 128];
+        let compressed = zstd::stream::encode_all(&payload[..], 0).unwrap();
+
+        let err = decompress(Compression::Zstd.to_code(), &compressed, 0, None, 127).unwrap_err();
+        assert!(err.to_string().contains("block budget"));
     }
 
     #[cfg(feature = "jpeg")]
