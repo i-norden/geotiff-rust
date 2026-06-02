@@ -470,13 +470,27 @@ impl ImageBuilder {
                 self.bits_per_sample
             )));
         }
-        if let DataLayout::Tiles { width, height } = self.layout {
-            if width % 16 != 0 || height % 16 != 0 {
-                return Err(crate::error::Error::InvalidConfig(format!(
-                    "tile dimensions must be multiples of 16, got {}x{}",
-                    width, height
-                )));
+        match self.layout {
+            DataLayout::Strips { rows_per_strip: 0 } => {
+                return Err(crate::error::Error::InvalidConfig(
+                    "rows_per_strip must be greater than zero".into(),
+                ));
             }
+            DataLayout::Tiles { width, height } => {
+                if width == 0 || height == 0 {
+                    return Err(crate::error::Error::InvalidConfig(format!(
+                        "tile_width and tile_height must be greater than zero, got {}x{}",
+                        width, height
+                    )));
+                }
+                if width % 16 != 0 || height % 16 != 0 {
+                    return Err(crate::error::Error::InvalidConfig(format!(
+                        "tile dimensions must be multiples of 16, got {}x{}",
+                        width, height
+                    )));
+                }
+            }
+            _ => {}
         }
         if matches!(self.compression, Compression::Lerc)
             && !matches!(self.predictor, Predictor::None)
@@ -703,5 +717,42 @@ fn photometric_name(photometric: PhotometricInterpretation) -> &'static str {
         PhotometricInterpretation::Separated => "Separated",
         PhotometricInterpretation::YCbCr => "YCbCr",
         PhotometricInterpretation::CieLab => "CIELab",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ImageBuilder;
+
+    #[test]
+    fn validate_rejects_zero_strip_and_tile_dimensions() {
+        let err = ImageBuilder::new(16, 16).strips(0).validate().unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("rows_per_strip"))
+        );
+
+        let err = ImageBuilder::new(16, 16)
+            .tiles(0, 16)
+            .validate()
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("tile_width"))
+        );
+
+        let err = ImageBuilder::new(16, 16)
+            .tiles(16, 0)
+            .validate()
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("tile_height"))
+        );
+
+        let err = ImageBuilder::new(16, 16)
+            .tiles(0, 0)
+            .validate()
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("tile_width") && message.contains("tile_height"))
+        );
     }
 }
