@@ -26,24 +26,26 @@ env:
 jobs:
   parity:
     name: GDAL/libtiff Parity
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        run: rustup toolchain install 1.91.0 --profile minimal --component rustfmt,clippy --no-self-update
       - uses: Swatinem/rust-cache@v2
       - name: Run Docker parity checks
         run: ./scripts/run-reference-parity.sh
 
   benchmark:
     name: GDAL/libtiff Comparison Bench
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: parity
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_benchmarks }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        run: rustup toolchain install 1.91.0 --profile minimal --component rustfmt,clippy --no-self-update
       - uses: Swatinem/rust-cache@v2
       - name: Run Docker Criterion comparison benches
         run: ./scripts/run-reference-benchmarks.sh
