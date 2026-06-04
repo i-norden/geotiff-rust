@@ -21,6 +21,27 @@ pub use tiff_core::{
     PhotometricInterpretation, YCbCrPositioning,
 };
 
+/// Budgets that bound TIFF IFD parsing allocations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseBudgets {
+    /// Maximum number of IFDs to follow in a chain.
+    pub max_ifds: usize,
+    /// Maximum tag entries allowed in one IFD.
+    pub max_ifd_entries: usize,
+    /// Maximum encoded value bytes allowed for one tag value.
+    pub max_tag_value_bytes: usize,
+}
+
+impl Default for ParseBudgets {
+    fn default() -> Self {
+        Self {
+            max_ifds: 10_000,
+            max_ifd_entries: 65_536,
+            max_tag_value_bytes: 128 * 1024 * 1024,
+        }
+    }
+}
+
 /// Parsed TIFF `LercParameters` tag payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LercParameters {
@@ -532,12 +553,27 @@ impl Ifd {
 
 /// Parse the chain of IFDs starting from the header's first IFD offset.
 pub fn parse_ifd_chain(source: &dyn TiffSource, header: &TiffHeader) -> Result<Vec<Ifd>> {
+    parse_ifd_chain_with_budgets(source, header, ParseBudgets::default())
+}
+
+/// Parse the chain of IFDs using explicit allocation budgets.
+pub fn parse_ifd_chain_with_budgets(
+    source: &dyn TiffSource,
+    header: &TiffHeader,
+    budgets: ParseBudgets,
+) -> Result<Vec<Ifd>> {
     let mut ifds = Vec::new();
     let mut offset = header.first_ifd_offset;
     let mut index = 0usize;
     let mut seen_offsets = HashSet::new();
 
     while offset != 0 {
+        if index >= budgets.max_ifds {
+            return Err(Error::Other(format!(
+                "IFD chain exceeds parse budget of {} IFDs",
+                budgets.max_ifds
+            )));
+        }
         if !seen_offsets.insert(offset) {
             return Err(Error::InvalidImageLayout(format!(
                 "IFD chain contains a loop at offset {offset}"
@@ -551,15 +587,11 @@ pub fn parse_ifd_chain(source: &dyn TiffSource, header: &TiffHeader) -> Result<V
             });
         }
 
-        let (tags, next_offset) = read_ifd(source, header, offset)?;
+        let (tags, next_offset) = read_ifd(source, header, offset, budgets)?;
 
         ifds.push(Ifd { tags, index });
         offset = next_offset;
         index += 1;
-
-        if index > 10_000 {
-            return Err(Error::Other("IFD chain exceeds 10,000 entries".into()));
-        }
     }
 
     Ok(ifds)
@@ -567,14 +599,29 @@ pub fn parse_ifd_chain(source: &dyn TiffSource, header: &TiffHeader) -> Result<V
 
 /// Parse a single IFD at the given file offset.
 pub fn parse_ifd_at(source: &dyn TiffSource, header: &TiffHeader, offset: u64) -> Result<Ifd> {
-    let (tags, _) = read_ifd(source, header, offset)?;
+    parse_ifd_at_with_budgets(source, header, offset, ParseBudgets::default())
+}
+
+/// Parse a single IFD at the given file offset using explicit allocation budgets.
+pub fn parse_ifd_at_with_budgets(
+    source: &dyn TiffSource,
+    header: &TiffHeader,
+    offset: u64,
+    budgets: ParseBudgets,
+) -> Result<Ifd> {
+    let (tags, _) = read_ifd(source, header, offset, budgets)?;
     Ok(Ifd {
         tags,
         index: usize::try_from(offset).unwrap_or(usize::MAX),
     })
 }
 
-fn read_ifd(source: &dyn TiffSource, header: &TiffHeader, offset: u64) -> Result<(Vec<Tag>, u64)> {
+fn read_ifd(
+    source: &dyn TiffSource,
+    header: &TiffHeader,
+    offset: u64,
+    budgets: ParseBudgets,
+) -> Result<(Vec<Tag>, u64)> {
     let entry_count_size = if header.is_bigtiff() { 8usize } else { 2usize };
     let entry_size = if header.is_bigtiff() {
         20usize
@@ -592,6 +639,12 @@ fn read_ifd(source: &dyn TiffSource, header: &TiffHeader, offset: u64) -> Result
     } else {
         count_cursor.read_u16()? as usize
     };
+    if count > budgets.max_ifd_entries {
+        return Err(Error::InvalidImageLayout(format!(
+            "IFD entry count {count} exceeds parse budget {}",
+            budgets.max_ifd_entries
+        )));
+    }
 
     let entries_len = count
         .checked_mul(entry_size)
@@ -601,11 +654,11 @@ fn read_ifd(source: &dyn TiffSource, header: &TiffHeader, offset: u64) -> Result
     let mut cursor = Cursor::new(&body, header.byte_order);
 
     if header.is_bigtiff() {
-        let tags = parse_tags_bigtiff(&mut cursor, count, source, header.byte_order)?;
+        let tags = parse_tags_bigtiff(&mut cursor, count, source, header.byte_order, budgets)?;
         let next = cursor.read_u64()?;
         Ok((tags, next))
     } else {
-        let tags = parse_tags_classic(&mut cursor, count, source, header.byte_order)?;
+        let tags = parse_tags_classic(&mut cursor, count, source, header.byte_order, budgets)?;
         let next = cursor.read_u32()? as u64;
         Ok((tags, next))
     }
@@ -801,6 +854,7 @@ fn parse_tags_classic(
     count: usize,
     source: &dyn TiffSource,
     byte_order: ByteOrder,
+    budgets: ParseBudgets,
 ) -> Result<Vec<Tag>> {
     let mut tags = Vec::with_capacity(count);
     for _ in 0..count {
@@ -815,6 +869,7 @@ fn parse_tags_classic(
             value_offset_bytes,
             source,
             byte_order,
+            budgets.max_tag_value_bytes,
         )?;
         tags.push(tag);
     }
@@ -828,6 +883,7 @@ fn parse_tags_bigtiff(
     count: usize,
     source: &dyn TiffSource,
     byte_order: ByteOrder,
+    budgets: ParseBudgets,
 ) -> Result<Vec<Tag>> {
     let mut tags = Vec::with_capacity(count);
     for _ in 0..count {
@@ -842,6 +898,7 @@ fn parse_tags_bigtiff(
             value_offset_bytes,
             source,
             byte_order,
+            budgets.max_tag_value_bytes,
         )?;
         tags.push(tag);
     }

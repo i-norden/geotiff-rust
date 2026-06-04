@@ -13,9 +13,11 @@ pub fn parse_tag_classic(
     value_offset_bytes: &[u8],
     source: &dyn TiffSource,
     byte_order: ByteOrder,
+    max_value_bytes: usize,
 ) -> Result<Tag> {
     let tag_type = TagType::from_code(type_code);
     let total_size = value_len(code, count, tag_type.element_size())?;
+    validate_value_budget(code, total_size, max_value_bytes)?;
 
     let owned;
     let value_bytes = if total_size <= 4 {
@@ -46,9 +48,11 @@ pub fn parse_tag_bigtiff(
     value_offset_bytes: &[u8],
     source: &dyn TiffSource,
     byte_order: ByteOrder,
+    max_value_bytes: usize,
 ) -> Result<Tag> {
     let tag_type = TagType::from_code(type_code);
     let total_size = value_len(code, count, tag_type.element_size())?;
+    validate_value_budget(code, total_size, max_value_bytes)?;
 
     let owned;
     let value_bytes = if total_size <= 8 {
@@ -91,6 +95,18 @@ fn value_len(tag: u16, count: u64, element_size: usize) -> Result<usize> {
         })
 }
 
+fn validate_value_budget(tag: u16, total_size: usize, max_value_bytes: usize) -> Result<()> {
+    if total_size > max_value_bytes {
+        return Err(Error::InvalidTagValue {
+            tag,
+            reason: format!(
+                "value byte length {total_size} exceeds parse budget {max_value_bytes}"
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn slice_at(data: &[u8], offset: u64, len: usize) -> Result<&[u8]> {
     let start = usize::try_from(offset).map_err(|_| Error::OffsetOutOfBounds {
         offset,
@@ -119,7 +135,8 @@ fn decode_value(
     byte_order: ByteOrder,
 ) -> Result<TagValue> {
     let mut cursor = Cursor::new(bytes, byte_order);
-    let n = count as usize;
+    let n =
+        usize::try_from(count).map_err(|_| Error::Other("tag value count exceeds usize".into()))?;
 
     Ok(match tag_type {
         TagType::Byte | TagType::Unknown(_) => TagValue::Byte(cursor.read_bytes(n)?.to_vec()),
