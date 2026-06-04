@@ -443,7 +443,7 @@ fn sub_ifds_tag(count: usize, is_bigtiff: bool) -> Result<Tag> {
 }
 
 fn build_cog_image_tags(image: &CogImage, is_bigtiff: bool) -> Result<Vec<Tag>> {
-    let mut tags = image.builder.build_tags(is_bigtiff);
+    let mut tags = image.builder.checked_build_tags(is_bigtiff)?;
     if image.sub_ifd_count > 0 {
         tags.push(sub_ifds_tag(image.sub_ifd_count, is_bigtiff)?);
         tags.sort_by_key(|tag| tag.code);
@@ -500,7 +500,7 @@ fn plan_cog_layout_for_variant(
     )?;
 
     for image in images {
-        let expected_blocks = image.builder.block_count();
+        let expected_blocks = image.builder.checked_block_count()?;
         if image.blocks.len() != expected_blocks {
             return Err(Error::Other(format!(
                 "COG image is missing block records: expected {expected_blocks}, got {}",
@@ -602,7 +602,7 @@ fn emit_cog<W: Write + Seek>(
             &planned.tags,
             offsets_tag_code,
             byte_counts_tag_code,
-            image.builder.block_count(),
+            image.builder.checked_block_count()?,
         )?;
         ifd_results.push(ifd_result);
     }

@@ -594,7 +594,7 @@ impl GeoTiffBuilder {
         }
 
         let ib = self.to_image_builder::<T>()?;
-        let block_count = ib.block_count();
+        let block_count = ib.checked_block_count()?;
         let mut writer = TiffWriter::new(
             sink,
             WriteOptions {
@@ -640,7 +640,7 @@ impl GeoTiffBuilder {
         }
 
         let ib = self.to_image_builder::<T>()?;
-        let block_count = ib.block_count();
+        let block_count = ib.checked_block_count()?;
         let mut writer = TiffWriter::new(
             sink,
             WriteOptions {

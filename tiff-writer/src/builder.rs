@@ -242,6 +242,12 @@ impl ImageBuilder {
 
     /// Total number of blocks (strips or tiles) for this image configuration.
     pub fn block_count(&self) -> usize {
+        self.checked_block_count()
+            .expect("ImageBuilder::block_count requires a validated layout")
+    }
+
+    /// Checked total number of blocks (strips or tiles) for this image configuration.
+    pub fn checked_block_count(&self) -> crate::error::Result<usize> {
         let blocks_per_plane = match self.layout {
             DataLayout::Strips { rows_per_strip } => {
                 let rps = rows_per_strip.max(1) as usize;
@@ -252,39 +258,70 @@ impl ImageBuilder {
                 let th = height.max(1) as usize;
                 let tiles_across = (self.width as usize).div_ceil(tw);
                 let tiles_down = (self.height as usize).div_ceil(th);
-                tiles_across * tiles_down
+                tiles_across
+                    .checked_mul(tiles_down)
+                    .ok_or_else(|| layout_overflow("tile count"))?
             }
         };
         if matches!(self.planar_configuration, PlanarConfiguration::Planar) {
-            blocks_per_plane * self.samples_per_pixel as usize
-        } else {
             blocks_per_plane
+                .checked_mul(self.samples_per_pixel as usize)
+                .ok_or_else(|| layout_overflow("planar block count"))
+        } else {
+            Ok(blocks_per_plane)
         }
     }
 
     /// Expected number of samples for the block at `index`.
     pub fn block_sample_count(&self, index: usize) -> usize {
+        self.checked_block_sample_count(index)
+            .expect("ImageBuilder::block_sample_count requires a validated layout")
+    }
+
+    /// Checked expected number of samples for the block at `index`.
+    pub fn checked_block_sample_count(&self, index: usize) -> crate::error::Result<usize> {
         let samples_per_pixel = self.block_samples_per_pixel() as usize;
-        let plane_block_index = self.block_plane_index(index);
+        let plane_block_index = self.checked_block_plane_index(index)?;
         match self.layout {
             DataLayout::Strips { rows_per_strip } => {
                 let rps = rows_per_strip.max(1) as usize;
-                let start_row = plane_block_index * rps;
-                let end_row = ((plane_block_index + 1) * rps).min(self.height as usize);
+                let start_row = plane_block_index
+                    .checked_mul(rps)
+                    .ok_or_else(|| layout_overflow("strip start row"))?;
+                let end_row = plane_block_index
+                    .checked_add(1)
+                    .and_then(|value| value.checked_mul(rps))
+                    .ok_or_else(|| layout_overflow("strip end row"))?
+                    .min(self.height as usize);
                 let rows = end_row.saturating_sub(start_row);
-                rows * self.width as usize * samples_per_pixel
+                rows.checked_mul(self.width as usize)
+                    .and_then(|value| value.checked_mul(samples_per_pixel))
+                    .ok_or_else(|| layout_overflow("strip sample count"))
             }
             DataLayout::Tiles { width, height } => {
                 // Tiles are always full-sized (padded at edges)
-                width as usize * height as usize * samples_per_pixel
+                (width as usize)
+                    .checked_mul(height as usize)
+                    .and_then(|value| value.checked_mul(samples_per_pixel))
+                    .ok_or_else(|| layout_overflow("tile sample count"))
             }
         }
     }
 
     /// Estimated uncompressed image bytes.
     pub fn estimated_uncompressed_bytes(&self) -> u64 {
+        self.checked_estimated_uncompressed_bytes()
+            .expect("ImageBuilder::estimated_uncompressed_bytes requires a validated layout")
+    }
+
+    /// Checked estimated uncompressed image bytes.
+    pub fn checked_estimated_uncompressed_bytes(&self) -> crate::error::Result<u64> {
         let bps = (self.bits_per_sample / 8).max(1) as u64;
-        self.width as u64 * self.height as u64 * self.samples_per_pixel as u64 * bps
+        (self.width as u64)
+            .checked_mul(self.height as u64)
+            .and_then(|value| value.checked_mul(self.samples_per_pixel as u64))
+            .and_then(|value| value.checked_mul(bps))
+            .ok_or_else(|| layout_overflow("estimated uncompressed byte count"))
     }
 
     /// The TIFF tag codes for offset and bytecount arrays.
@@ -315,6 +352,12 @@ impl ImageBuilder {
 
     /// Build the serialized TIFF tags for this image definition.
     pub fn build_tags(&self, is_bigtiff: bool) -> Vec<Tag> {
+        self.checked_build_tags(is_bigtiff)
+            .expect("ImageBuilder::build_tags requires a validated layout")
+    }
+
+    /// Checked build of the serialized TIFF tags for this image definition.
+    pub fn checked_build_tags(&self, is_bigtiff: bool) -> crate::error::Result<Vec<Tag>> {
         let mut extra_tags = self.extra_tags.clone();
         if let Some(lerc_tag) = self.lerc_parameters_tag() {
             extra_tags.push(lerc_tag);
@@ -359,7 +402,7 @@ impl ImageBuilder {
         let (offsets_tag_code, byte_counts_tag_code) = self.offset_tag_codes();
         let layout_tags = self.layout_tags();
 
-        encoder::build_image_tags(&encoder::ImageTagParams {
+        Ok(encoder::build_image_tags(&encoder::ImageTagParams {
             width: self.width,
             height: self.height,
             samples_per_pixel: self.samples_per_pixel,
@@ -373,10 +416,10 @@ impl ImageBuilder {
             extra_tags: &extra_tags,
             offsets_tag_code,
             byte_counts_tag_code,
-            num_blocks: self.block_count(),
+            num_blocks: self.checked_block_count()?,
             layout_tags: &layout_tags,
             is_bigtiff,
-        })
+        }))
     }
 
     /// Row width in pixels for compression pipeline (tile_width or image_width).
@@ -397,25 +440,38 @@ impl ImageBuilder {
     }
 
     fn block_plane_index(&self, index: usize) -> usize {
+        self.checked_block_plane_index(index)
+            .expect("ImageBuilder::block_plane_index requires a validated layout")
+    }
+
+    fn checked_block_plane_index(&self, index: usize) -> crate::error::Result<usize> {
         if matches!(self.planar_configuration, PlanarConfiguration::Planar) {
-            index % self.blocks_per_plane()
+            let blocks_per_plane = self.checked_blocks_per_plane()?;
+            if blocks_per_plane == 0 {
+                return Err(crate::error::Error::InvalidConfig(
+                    "block count must be greater than zero".into(),
+                ));
+            }
+            Ok(index % blocks_per_plane)
         } else {
-            index
+            Ok(index)
         }
     }
 
-    fn blocks_per_plane(&self) -> usize {
+    fn checked_blocks_per_plane(&self) -> crate::error::Result<usize> {
         match self.layout {
             DataLayout::Strips { rows_per_strip } => {
                 let rps = rows_per_strip.max(1) as usize;
-                (self.height as usize).div_ceil(rps)
+                Ok((self.height as usize).div_ceil(rps))
             }
             DataLayout::Tiles { width, height } => {
                 let tw = width.max(1) as usize;
                 let th = height.max(1) as usize;
                 let tiles_across = (self.width as usize).div_ceil(tw);
                 let tiles_down = (self.height as usize).div_ceil(th);
-                tiles_across * tiles_down
+                tiles_across
+                    .checked_mul(tiles_down)
+                    .ok_or_else(|| layout_overflow("tile count"))
             }
         }
     }
@@ -492,6 +548,9 @@ impl ImageBuilder {
             }
             _ => {}
         }
+        self.checked_block_count()?;
+        self.checked_block_sample_count(0)?;
+        self.checked_estimated_uncompressed_bytes()?;
         if matches!(self.compression, Compression::Lerc)
             && !matches!(self.predictor, Predictor::None)
         {
@@ -720,9 +779,14 @@ fn photometric_name(photometric: PhotometricInterpretation) -> &'static str {
     }
 }
 
+fn layout_overflow(context: &'static str) -> crate::error::Error {
+    crate::error::Error::InvalidConfig(format!("{context} overflows layout size limits"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::ImageBuilder;
+    use tiff_core::PlanarConfiguration;
 
     #[test]
     fn validate_rejects_zero_strip_and_tile_dimensions() {
@@ -753,6 +817,41 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("tile_width") && message.contains("tile_height"))
+        );
+    }
+
+    #[test]
+    fn validate_rejects_overflowing_layout_sizes() {
+        let err = ImageBuilder::new(u32::MAX, u32::MAX)
+            .sample_type::<u8>()
+            .samples_per_pixel(u16::MAX)
+            .planar_configuration(PlanarConfiguration::Planar)
+            .tiles(16, 16)
+            .validate()
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("block count"))
+        );
+
+        let large_multiple_of_16 = u32::MAX - 15;
+        let err = ImageBuilder::new(1, 1)
+            .sample_type::<u8>()
+            .samples_per_pixel(2)
+            .tiles(large_multiple_of_16, large_multiple_of_16)
+            .validate()
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("sample count"))
+        );
+
+        let err = ImageBuilder::new(u32::MAX, u32::MAX)
+            .sample_type::<u64>()
+            .samples_per_pixel(2)
+            .strips(256)
+            .validate()
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("byte count"))
         );
     }
 }
