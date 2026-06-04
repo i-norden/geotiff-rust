@@ -45,7 +45,7 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
         let fill_value = nodata_fill_or_zero::<T>(&builder.nodata);
 
         let ib = builder.to_image_builder::<T>()?;
-        let num_blocks = ib.block_count();
+        let num_blocks = ib.checked_block_count()?;
         let tiles_across = (builder.width as usize).div_ceil(tw as usize);
         let tiles_down = (builder.height as usize).div_ceil(th as usize);
 

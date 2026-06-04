@@ -123,10 +123,11 @@ impl<W: Write + Seek> TiffWriter<W> {
             return Err(Error::AlreadyFinalized);
         }
         builder.validate()?;
+        let block_count = builder.checked_block_count()?;
 
         let index = self.images.len();
         self.images.push(IfdState {
-            block_records: vec![None; builder.block_count()],
+            block_records: vec![None; block_count],
             builder,
         });
 
@@ -176,7 +177,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             .get(handle.index)
             .ok_or(Error::Other("invalid image handle".into()))?;
 
-        let total_blocks = state.builder.block_count();
+        let total_blocks = state.block_records.len();
         if block_index >= total_blocks {
             return Err(Error::BlockIndexOutOfRange {
                 index: block_index,
@@ -184,7 +185,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             });
         }
 
-        let expected = state.builder.block_sample_count(block_index);
+        let expected = state.builder.checked_block_sample_count(block_index)?;
         if samples.len() != expected {
             return Err(Error::BlockSizeMismatch {
                 index: block_index,
@@ -239,7 +240,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             .images
             .get(handle.index)
             .ok_or(Error::Other("invalid image handle".into()))?;
-        let total = state.builder.block_count();
+        let total = state.block_records.len();
         if block_index >= total {
             return Err(Error::BlockIndexOutOfRange {
                 index: block_index,
@@ -282,7 +283,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             .images
             .get(handle.index)
             .ok_or(Error::Other("invalid image handle".into()))?;
-        let total = state.builder.block_count();
+        let total = state.block_records.len();
         if block_index >= total {
             return Err(Error::BlockIndexOutOfRange {
                 index: block_index,
@@ -340,7 +341,7 @@ impl<W: Write + Seek> TiffWriter<W> {
 
         let mut current = self.sink.seek(SeekFrom::End(0))?;
         for state in &self.images {
-            let tags = state.builder.build_tags(false);
+            let tags = state.builder.checked_build_tags(false)?;
             current = checked_add_u64(
                 current,
                 encoder::estimate_ifd_size(self.byte_order, false, &tags),
@@ -364,7 +365,7 @@ impl<W: Write + Seek> TiffWriter<W> {
 
         let mut current = self.sink.seek(SeekFrom::End(0))?;
         for state in &self.images {
-            let tags = state.builder.build_tags(false);
+            let tags = state.builder.checked_build_tags(false)?;
             current = checked_add_u64(
                 current,
                 encoder::estimate_ifd_size(self.byte_order, false, &tags),
@@ -382,7 +383,7 @@ impl<W: Write + Seek> TiffWriter<W> {
     ) -> Result<Vec<(Vec<Tag>, encoder::IfdWriteResult)>> {
         let mut results = Vec::with_capacity(self.images.len());
         for state in &self.images {
-            let tags = state.builder.build_tags(is_bigtiff);
+            let tags = state.builder.checked_build_tags(is_bigtiff)?;
             let (offsets_tag_code, byte_counts_tag_code) = state.builder.offset_tag_codes();
             let ifd_result = encoder::write_ifd(
                 &mut self.sink,
@@ -391,7 +392,7 @@ impl<W: Write + Seek> TiffWriter<W> {
                 &tags,
                 offsets_tag_code,
                 byte_counts_tag_code,
-                state.builder.block_count(),
+                state.block_records.len(),
             )?;
             results.push((tags, ifd_result));
         }
@@ -406,7 +407,7 @@ impl<W: Write + Seek> TiffWriter<W> {
         self.finalized = true;
 
         for state in &self.images {
-            let total = state.builder.block_count();
+            let total = state.block_records.len();
             let written = state
                 .block_records
                 .iter()
