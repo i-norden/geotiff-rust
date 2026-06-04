@@ -221,7 +221,7 @@ impl TagValue {
         match self {
             Self::Long(v) => v.first().copied(),
             Self::Short(v) => v.first().map(|&s| s as u32),
-            Self::Long8(v) => v.first().map(|&l| l as u32),
+            Self::Long8(v) => v.first().and_then(|&l| u32::try_from(l).ok()),
             _ => None,
         }
     }
