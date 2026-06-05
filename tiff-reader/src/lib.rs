@@ -1557,6 +1557,27 @@ mod tests {
     }
 
     #[test]
+    fn rejects_bigtiff_long8_dimension_that_exceeds_u32() {
+        let mut data = bigtiff_header(16);
+        data.extend_from_slice(&le_u64(2));
+        data.extend_from_slice(&le_u16(256));
+        data.extend_from_slice(&le_u16(16));
+        data.extend_from_slice(&le_u64(1));
+        data.extend_from_slice(&le_u64(u64::from(u32::MAX) + 2));
+        data.extend_from_slice(&le_u16(257));
+        data.extend_from_slice(&le_u16(16));
+        data.extend_from_slice(&le_u64(1));
+        data.extend_from_slice(&le_u64(1));
+        data.extend_from_slice(&le_u64(0));
+
+        let file = TiffFile::from_bytes(data).unwrap();
+        let err = file.ifd(0).unwrap().raster_layout().unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidImageLayout(message) if message.contains("dimensions"))
+        );
+    }
+
+    #[test]
     fn reads_stripped_u8_image() {
         let data = build_stripped_tiff(2, 2, &[1, 2, 3, 4], &[]);
         let file = TiffFile::from_bytes(data).unwrap();
