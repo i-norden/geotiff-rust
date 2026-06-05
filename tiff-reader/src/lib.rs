@@ -50,7 +50,7 @@ use source::{BytesSource, MmapSource, SharedSource, TiffSource};
 
 pub use error::Error as TiffError;
 pub use header::ByteOrder;
-pub use ifd::{Ifd, RasterLayout};
+pub use ifd::{Ifd, ParseBudgets, RasterLayout};
 pub use tag::{Tag, TagValue};
 pub use tiff_core::constants;
 pub use tiff_core::sample::TiffSample;
@@ -66,6 +66,8 @@ pub struct OpenOptions {
     pub block_cache_bytes: usize,
     /// Maximum number of cached strips/tiles.
     pub block_cache_slots: usize,
+    /// Maximum number of IFDs, tag entries, and tag-value bytes parsed from metadata.
+    pub parse_budgets: ParseBudgets,
 }
 
 impl Default for OpenOptions {
@@ -73,6 +75,7 @@ impl Default for OpenOptions {
         Self {
             block_cache_bytes: 64 * 1024 * 1024,
             block_cache_slots: 257,
+            parse_budgets: ParseBudgets::default(),
         }
     }
 }
@@ -82,6 +85,7 @@ pub struct TiffFile {
     source: SharedSource,
     header: header::TiffHeader,
     ifds: Vec<ifd::Ifd>,
+    parse_budgets: ParseBudgets,
     block_cache: Arc<BlockCache>,
     gdal_structural_metadata: Option<GdalStructuralMetadata>,
 }
@@ -291,11 +295,13 @@ impl TiffFile {
         let header_bytes = source.read_exact_at(0, header_len)?;
         let header = header::TiffHeader::parse(&header_bytes)?;
         let gdal_structural_metadata = parse_gdal_structural_metadata(source.as_ref());
-        let ifds = ifd::parse_ifd_chain(source.as_ref(), &header)?;
+        let ifds =
+            ifd::parse_ifd_chain_with_budgets(source.as_ref(), &header, options.parse_budgets)?;
         Ok(Self {
             source,
             header,
             ifds,
+            parse_budgets: options.parse_budgets,
             block_cache: Arc::new(BlockCache::new(
                 options.block_cache_bytes,
                 options.block_cache_slots,
@@ -341,7 +347,12 @@ impl TiffFile {
 
     /// Parse an IFD at an arbitrary file offset.
     pub fn read_ifd_at_offset(&self, offset: u64) -> Result<Ifd> {
-        ifd::parse_ifd_at(self.source.as_ref(), &self.header, offset)
+        ifd::parse_ifd_at_with_budgets(
+            self.source.as_ref(),
+            &self.header,
+            offset,
+            self.parse_budgets,
+        )
     }
 
     /// Decode an image into native-endian interleaved storage sample bytes.
@@ -947,7 +958,8 @@ mod tests {
 
     use super::{
         parse_gdal_structural_metadata, parse_gdal_structural_metadata_len, Error,
-        GdalStructuralMetadata, TiffFile, GDAL_STRUCTURAL_METADATA_PREFIX,
+        GdalStructuralMetadata, OpenOptions, ParseBudgets, TiffFile,
+        GDAL_STRUCTURAL_METADATA_PREFIX,
     };
     use crate::source::{BytesSource, TiffSource};
     use flate2::{write::ZlibEncoder, Compression as FlateCompression};
@@ -958,6 +970,20 @@ mod tests {
 
     fn le_u32(value: u32) -> [u8; 4] {
         value.to_le_bytes()
+    }
+
+    fn le_u64(value: u64) -> [u8; 8] {
+        value.to_le_bytes()
+    }
+
+    fn bigtiff_header(first_ifd_offset: u64) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"II");
+        bytes.extend_from_slice(&le_u16(43));
+        bytes.extend_from_slice(&le_u16(8));
+        bytes.extend_from_slice(&le_u16(0));
+        bytes.extend_from_slice(&le_u64(first_ifd_offset));
+        bytes
     }
 
     fn inline_short(value: u16) -> Vec<u8> {
@@ -1453,6 +1479,81 @@ mod tests {
             }
             Ok(self.bytes[start..end].to_vec())
         }
+    }
+
+    #[test]
+    fn bigtiff_ifd_entry_count_respects_parse_budget_before_body_read() {
+        let mut data = bigtiff_header(16);
+        data.extend_from_slice(&le_u64(2));
+
+        let err = match TiffFile::from_bytes_with_options(
+            data,
+            OpenOptions {
+                parse_budgets: ParseBudgets {
+                    max_ifd_entries: 1,
+                    ..ParseBudgets::default()
+                },
+                ..OpenOptions::default()
+            },
+        ) {
+            Ok(_) => panic!("expected parse budget error"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, Error::InvalidImageLayout(message) if message.contains("entry count"))
+        );
+    }
+
+    #[test]
+    fn bigtiff_tag_value_bytes_respect_parse_budget_before_value_read() {
+        let mut data = bigtiff_header(16);
+        data.extend_from_slice(&le_u64(1));
+        data.extend_from_slice(&le_u16(256));
+        data.extend_from_slice(&le_u16(1));
+        data.extend_from_slice(&le_u64(9));
+        data.extend_from_slice(&le_u64(1024));
+        data.extend_from_slice(&le_u64(0));
+
+        let err = match TiffFile::from_bytes_with_options(
+            data,
+            OpenOptions {
+                parse_budgets: ParseBudgets {
+                    max_tag_value_bytes: 8,
+                    ..ParseBudgets::default()
+                },
+                ..OpenOptions::default()
+            },
+        ) {
+            Ok(_) => panic!("expected parse budget error"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, Error::InvalidTagValue { tag: 256, reason } if reason.contains("parse budget"))
+        );
+    }
+
+    #[test]
+    fn bigtiff_ifd_chain_respects_parse_budget() {
+        let mut data = bigtiff_header(16);
+        data.extend_from_slice(&le_u64(0));
+        data.extend_from_slice(&le_u64(32));
+        data.extend_from_slice(&le_u64(0));
+        data.extend_from_slice(&le_u64(0));
+
+        let err = match TiffFile::from_bytes_with_options(
+            data,
+            OpenOptions {
+                parse_budgets: ParseBudgets {
+                    max_ifds: 1,
+                    ..ParseBudgets::default()
+                },
+                ..OpenOptions::default()
+            },
+        ) {
+            Ok(_) => panic!("expected parse budget error"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, Error::Other(message) if message.contains("parse budget")));
     }
 
     #[test]

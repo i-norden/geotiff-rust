@@ -16,6 +16,7 @@ fuzz_target!(|data: &[u8]| {
         OpenOptions {
             block_cache_bytes: 0,
             block_cache_slots: 0,
+            parse_budgets: Default::default(),
         },
     ) {
         Ok(file) => file,
