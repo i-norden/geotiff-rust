@@ -8,6 +8,8 @@ use tiff_core::{ColorModel, Compression, RasterLayout, SampleFormat};
 
 const LERC1_MAGIC_PREFIX: &[u8; 9] = b"CntZImage";
 const LERC2_MAGIC: &[u8; 6] = b"Lerc2 ";
+const COMPRESSED_BLOCK_INPUT_RATIO: usize = 4;
+const COMPRESSED_BLOCK_INPUT_SLACK: usize = 4096;
 
 pub(crate) struct BlockDecodeRequest<'a> {
     pub ifd: &'a Ifd,
@@ -121,6 +123,35 @@ pub(crate) fn decode_compressed_block(request: BlockDecodeRequest<'_>) -> Result
     }
 
     decode_lerc_block(request, expected_len)
+}
+
+pub(crate) fn compressed_block_byte_count_limit(request: &BlockDecodeRequest<'_>) -> Result<usize> {
+    let samples = if request.layout.planar_configuration == 1 {
+        request.layout.samples_per_pixel
+    } else {
+        1
+    };
+    let decoded_len_limit = expected_encoded_block_len(request, samples)?;
+
+    match Compression::from_code(request.ifd.compression()) {
+        Some(Compression::None) => Ok(decoded_len_limit),
+        Some(Compression::Lerc) => {
+            let lerc_payload_len_limit =
+                expected_lerc_payload_len_limit(request, decoded_len_limit)?;
+            match request
+                .ifd
+                .lerc_parameters()?
+                .map(|params| params.additional_compression)
+                .unwrap_or(LercAdditionalCompression::None)
+            {
+                LercAdditionalCompression::None => Ok(lerc_payload_len_limit),
+                LercAdditionalCompression::Deflate | LercAdditionalCompression::Zstd => {
+                    compressed_input_len_limit(lerc_payload_len_limit)
+                }
+            }
+        }
+        _ => compressed_input_len_limit(decoded_len_limit),
+    }
 }
 
 fn expected_encoded_block_len(request: &BlockDecodeRequest<'_>, samples: usize) -> Result<usize> {
@@ -315,7 +346,18 @@ fn decode_lerc_block(request: BlockDecodeRequest<'_>, expected_len: usize) -> Re
         .map(|params| params.additional_compression)
         .unwrap_or(LercAdditionalCompression::None)
     {
-        LercAdditionalCompression::None => request.compressed.to_vec(),
+        LercAdditionalCompression::None => {
+            if request.compressed.len() > lerc_payload_len_limit {
+                return Err(Error::DecompressionFailed {
+                    index: request.index,
+                    reason: format!(
+                        "LERC: payload byte count {} exceeds TIFF block budget {lerc_payload_len_limit}",
+                        request.compressed.len()
+                    ),
+                });
+            }
+            request.compressed.to_vec()
+        }
         LercAdditionalCompression::Deflate => filters::decompress(
             Compression::Deflate.to_code(),
             request.compressed,
@@ -383,6 +425,15 @@ fn expected_lerc_payload_len_limit(
         .and_then(|value| value.checked_add(4096))
         .ok_or_else(|| Error::InvalidImageLayout("LERC payload budget overflows usize".into()))?;
     Ok(raw_payload_budget.max(expected_len))
+}
+
+fn compressed_input_len_limit(decoded_len_limit: usize) -> Result<usize> {
+    decoded_len_limit
+        .checked_mul(COMPRESSED_BLOCK_INPUT_RATIO)
+        .and_then(|value| value.checked_add(COMPRESSED_BLOCK_INPUT_SLACK))
+        .ok_or_else(|| {
+            Error::InvalidImageLayout("compressed block input budget overflows usize".into())
+        })
 }
 
 fn validate_lerc_payload_before_decode(

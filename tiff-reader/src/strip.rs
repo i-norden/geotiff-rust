@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use crate::header::ByteOrder;
 use crate::ifd::{Ifd, RasterLayout};
 use crate::source::TiffSource;
-use crate::{read_gdal_block_payload, GdalStructuralMetadata, Window};
+use crate::{read_block_payload, read_gdal_block_payload, GdalStructuralMetadata, Window};
 
 const TAG_JPEG_TABLES: u16 = 347;
 
@@ -320,51 +320,39 @@ fn read_strip_block(
         return Ok(cached);
     }
 
-    let compressed = if gdal_structural_metadata.is_some() {
-        Vec::new()
-    } else if let Some(bytes) = source.as_slice() {
-        let start = usize::try_from(spec.offset).map_err(|_| Error::OffsetOutOfBounds {
-            offset: spec.offset,
-            length: spec.byte_count,
-            data_len: bytes.len() as u64,
-        })?;
-        let len = usize::try_from(spec.byte_count).map_err(|_| Error::OffsetOutOfBounds {
-            offset: spec.offset,
-            length: spec.byte_count,
-            data_len: bytes.len() as u64,
-        })?;
-        let end = start.checked_add(len).ok_or(Error::OffsetOutOfBounds {
-            offset: spec.offset,
-            length: spec.byte_count,
-            data_len: bytes.len() as u64,
-        })?;
-        if end > bytes.len() {
-            return Err(Error::OffsetOutOfBounds {
-                offset: spec.offset,
-                length: spec.byte_count,
-                data_len: bytes.len() as u64,
-            });
-        }
-        bytes[start..end].to_vec()
-    } else {
-        let len = usize::try_from(spec.byte_count).map_err(|_| Error::OffsetOutOfBounds {
-            offset: spec.offset,
-            length: spec.byte_count,
-            data_len: source.len(),
-        })?;
-        source.read_exact_at(spec.offset, len)?
-    };
-
-    let compressed = match gdal_structural_metadata {
-        Some(metadata) => {
-            read_gdal_block_payload(source, metadata, byte_order, spec.offset, spec.byte_count)?
-        }
-        None => compressed,
-    };
-
     let jpeg_tables = ifd
         .tag(TAG_JPEG_TABLES)
         .and_then(|tag| tag.value.as_bytes());
+    let byte_count_limit =
+        block_decode::compressed_block_byte_count_limit(&block_decode::BlockDecodeRequest {
+            ifd,
+            layout: *layout,
+            byte_order,
+            compressed: &[],
+            index: spec.index,
+            jpeg_tables,
+            block_width: layout.width,
+            block_height: spec.rows_in_strip,
+        })?;
+    let compressed = match gdal_structural_metadata {
+        Some(metadata) => read_gdal_block_payload(
+            source,
+            metadata,
+            byte_order,
+            spec.offset,
+            spec.byte_count,
+            byte_count_limit,
+            spec.index,
+        )?,
+        None => read_block_payload(
+            source,
+            spec.offset,
+            spec.byte_count,
+            byte_count_limit,
+            spec.index,
+        )?,
+    };
+
     let decoded = block_decode::decode_compressed_block(block_decode::BlockDecodeRequest {
         ifd,
         layout: *layout,
