@@ -192,13 +192,48 @@ impl GdalStructuralMetadata {
     }
 }
 
+pub(crate) fn read_block_payload(
+    source: &dyn TiffSource,
+    offset: u64,
+    byte_count: u64,
+    byte_count_limit: usize,
+    index: usize,
+) -> Result<Vec<u8>> {
+    let len = validate_block_byte_count(index, byte_count, byte_count_limit)?;
+    if let Some(bytes) = source.as_slice() {
+        let start = usize::try_from(offset).map_err(|_| Error::OffsetOutOfBounds {
+            offset,
+            length: byte_count,
+            data_len: bytes.len() as u64,
+        })?;
+        let end = start.checked_add(len).ok_or(Error::OffsetOutOfBounds {
+            offset,
+            length: byte_count,
+            data_len: bytes.len() as u64,
+        })?;
+        if end > bytes.len() {
+            return Err(Error::OffsetOutOfBounds {
+                offset,
+                length: byte_count,
+                data_len: bytes.len() as u64,
+            });
+        }
+        Ok(bytes[start..end].to_vec())
+    } else {
+        source.read_exact_at(offset, len)
+    }
+}
+
 pub(crate) fn read_gdal_block_payload(
     source: &dyn TiffSource,
     metadata: &GdalStructuralMetadata,
     byte_order: ByteOrder,
     offset: u64,
     byte_count: u64,
+    byte_count_limit: usize,
+    index: usize,
 ) -> Result<Vec<u8>> {
+    let payload_len = validate_block_byte_count(index, byte_count, byte_count_limit)?;
     let wrapped_extra = 4u64
         .checked_add(if metadata.block_trailer_repeats_last_4_bytes {
             4
@@ -236,9 +271,18 @@ pub(crate) fn read_gdal_block_payload(
         };
         match metadata.unwrap_block(&raw, byte_order, candidate_offset) {
             Ok(payload) => {
-                if candidate_offset != offset
-                    && payload.len() == usize::try_from(byte_count).unwrap_or(usize::MAX)
-                {
+                if payload.len() > byte_count_limit {
+                    let err =
+                        block_byte_count_too_large(index, payload.len() as u64, byte_count_limit);
+                    if candidate_offset == offset {
+                        return Err(err);
+                    }
+                    if fallback.is_none() {
+                        fallback = Some(Err(err));
+                    }
+                    continue;
+                }
+                if candidate_offset != offset && payload.len() == payload_len {
                     return Ok(payload.to_vec());
                 }
                 fallback = Some(Ok(payload.to_vec()));
@@ -254,6 +298,32 @@ pub(crate) fn read_gdal_block_payload(
     match fallback {
         Some(result) => result,
         None => Ok(Vec::new()),
+    }
+}
+
+fn validate_block_byte_count(
+    index: usize,
+    byte_count: u64,
+    byte_count_limit: usize,
+) -> Result<usize> {
+    let len = usize::try_from(byte_count)
+        .map_err(|_| block_byte_count_too_large(index, byte_count, byte_count_limit))?;
+    if len > byte_count_limit {
+        return Err(block_byte_count_too_large(
+            index,
+            byte_count,
+            byte_count_limit,
+        ));
+    }
+    Ok(len)
+}
+
+fn block_byte_count_too_large(index: usize, byte_count: u64, byte_count_limit: usize) -> Error {
+    Error::DecompressionFailed {
+        index,
+        reason: format!(
+            "encoded block byte count {byte_count} exceeds TIFF block read budget {byte_count_limit}"
+        ),
     }
 }
 
@@ -1481,6 +1551,20 @@ mod tests {
         }
     }
 
+    fn overwrite_classic_inline_long_tag(data: &mut [u8], tag: u16, value: u32) {
+        let ifd_offset = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
+        let entry_count = u16::from_le_bytes(data[ifd_offset..ifd_offset + 2].try_into().unwrap());
+        for entry_index in 0..usize::from(entry_count) {
+            let entry = ifd_offset + 2 + entry_index * 12;
+            let entry_tag = u16::from_le_bytes(data[entry..entry + 2].try_into().unwrap());
+            if entry_tag == tag {
+                data[entry + 8..entry + 12].copy_from_slice(&le_u32(value));
+                return;
+            }
+        }
+        panic!("tag {tag} not found");
+    }
+
     #[test]
     fn bigtiff_ifd_entry_count_respects_parse_budget_before_body_read() {
         let mut data = bigtiff_header(16);
@@ -1575,6 +1659,36 @@ mod tests {
         assert!(
             matches!(err, Error::InvalidImageLayout(message) if message.contains("dimensions"))
         );
+    }
+
+    #[test]
+    fn oversized_strip_byte_count_is_rejected_before_payload_read() {
+        let data = build_stripped_tiff(
+            2,
+            2,
+            &[1, 2, 3, 4],
+            &[(279, 4, 1, le_u32(u32::MAX).to_vec())],
+        );
+        let source = Arc::new(CountingSource::new(data));
+        let file = TiffFile::from_source(source.clone()).unwrap();
+        source.reset_reads();
+
+        let err = file.read_image_bytes(0).unwrap_err();
+        assert!(err.to_string().contains("block read budget"));
+        assert_eq!(source.reads(), 0);
+    }
+
+    #[test]
+    fn oversized_tile_byte_count_is_rejected_before_payload_read() {
+        let mut data = build_tiled_tiff(2, 2, 2, 2, &[&[1, 2, 3, 4]]);
+        overwrite_classic_inline_long_tag(&mut data, 325, u32::MAX);
+        let source = Arc::new(CountingSource::new(data));
+        let file = TiffFile::from_source(source.clone()).unwrap();
+        source.reset_reads();
+
+        let err = file.read_image_bytes(0).unwrap_err();
+        assert!(err.to_string().contains("block read budget"));
+        assert_eq!(source.reads(), 0);
     }
 
     #[test]

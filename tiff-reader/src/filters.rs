@@ -19,7 +19,16 @@ pub fn decompress(
     decoded_len_limit: usize,
 ) -> Result<Vec<u8>> {
     match Compression::from_code(compression) {
-        Some(Compression::None) => Ok(data.to_vec()),
+        Some(Compression::None) => {
+            if data.len() > decoded_len_limit {
+                return Err(decoded_block_too_large(
+                    index,
+                    "uncompressed",
+                    decoded_len_limit,
+                ));
+            }
+            Ok(data.to_vec())
+        }
         Some(Compression::Deflate | Compression::DeflateOld) => {
             decompress_deflate(data, index, decoded_len_limit)
         }
@@ -563,6 +572,13 @@ mod tests {
     #[test]
     fn packbits_decoder_rejects_blocks_that_exceed_budget() {
         let err = decompress_packbits(&[0x81, 0x2a], 0, 127).unwrap_err();
+        assert!(err.to_string().contains("block budget"));
+    }
+
+    #[test]
+    fn uncompressed_decoder_rejects_blocks_that_exceed_budget() {
+        let err =
+            decompress(Compression::None.to_code(), &[1, 2, 3, 4, 5], 0, None, 4).unwrap_err();
         assert!(err.to_string().contains("block budget"));
     }
 
