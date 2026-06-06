@@ -4,7 +4,7 @@ use crate::error::{Error, Result};
 use crate::header::{ByteOrder, TiffHeader};
 use crate::io::Cursor;
 use crate::source::TiffSource;
-use crate::tag::{parse_tag_bigtiff, parse_tag_classic, Tag};
+use crate::tag::{checked_tag_value_byte_len, parse_tag_bigtiff, parse_tag_classic, Tag};
 
 pub use tiff_core::constants::{
     TAG_BITS_PER_SAMPLE, TAG_COLOR_MAP, TAG_COMPRESSION, TAG_EXTRA_SAMPLES, TAG_IMAGE_LENGTH,
@@ -30,6 +30,8 @@ pub struct ParseBudgets {
     pub max_ifd_entries: usize,
     /// Maximum encoded value bytes allowed for one tag value.
     pub max_tag_value_bytes: usize,
+    /// Maximum encoded value bytes allowed across all parsed tag values.
+    pub max_metadata_value_bytes: usize,
 }
 
 impl Default for ParseBudgets {
@@ -38,7 +40,41 @@ impl Default for ParseBudgets {
             max_ifds: 10_000,
             max_ifd_entries: 65_536,
             max_tag_value_bytes: 128 * 1024 * 1024,
+            max_metadata_value_bytes: 512 * 1024 * 1024,
         }
+    }
+}
+
+#[derive(Default)]
+struct ParseBudgetUsage {
+    metadata_value_bytes: usize,
+}
+
+impl ParseBudgetUsage {
+    fn consume_tag_value_bytes(
+        &mut self,
+        tag: u16,
+        bytes: usize,
+        budgets: ParseBudgets,
+    ) -> Result<()> {
+        let total = self
+            .metadata_value_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| Error::InvalidTagValue {
+                tag,
+                reason: "aggregate metadata value byte length overflows usize".into(),
+            })?;
+        if total > budgets.max_metadata_value_bytes {
+            return Err(Error::InvalidTagValue {
+                tag,
+                reason: format!(
+                    "aggregate metadata value byte length {total} exceeds parse budget {}",
+                    budgets.max_metadata_value_bytes
+                ),
+            });
+        }
+        self.metadata_value_bytes = total;
+        Ok(())
     }
 }
 
@@ -566,6 +602,7 @@ pub fn parse_ifd_chain_with_budgets(
     let mut offset = header.first_ifd_offset;
     let mut index = 0usize;
     let mut seen_offsets = HashSet::new();
+    let mut usage = ParseBudgetUsage::default();
 
     while offset != 0 {
         if index >= budgets.max_ifds {
@@ -587,7 +624,7 @@ pub fn parse_ifd_chain_with_budgets(
             });
         }
 
-        let (tags, next_offset) = read_ifd(source, header, offset, budgets)?;
+        let (tags, next_offset) = read_ifd(source, header, offset, budgets, &mut usage)?;
 
         ifds.push(Ifd { tags, index });
         offset = next_offset;
@@ -609,7 +646,8 @@ pub fn parse_ifd_at_with_budgets(
     offset: u64,
     budgets: ParseBudgets,
 ) -> Result<Ifd> {
-    let (tags, _) = read_ifd(source, header, offset, budgets)?;
+    let mut usage = ParseBudgetUsage::default();
+    let (tags, _) = read_ifd(source, header, offset, budgets, &mut usage)?;
     Ok(Ifd {
         tags,
         index: usize::try_from(offset).unwrap_or(usize::MAX),
@@ -621,6 +659,7 @@ fn read_ifd(
     header: &TiffHeader,
     offset: u64,
     budgets: ParseBudgets,
+    usage: &mut ParseBudgetUsage,
 ) -> Result<(Vec<Tag>, u64)> {
     let entry_count_size = if header.is_bigtiff() { 8usize } else { 2usize };
     let entry_size = if header.is_bigtiff() {
@@ -654,11 +693,25 @@ fn read_ifd(
     let mut cursor = Cursor::new(&body, header.byte_order);
 
     if header.is_bigtiff() {
-        let tags = parse_tags_bigtiff(&mut cursor, count, source, header.byte_order, budgets)?;
+        let tags = parse_tags_bigtiff(
+            &mut cursor,
+            count,
+            source,
+            header.byte_order,
+            budgets,
+            usage,
+        )?;
         let next = cursor.read_u64()?;
         Ok((tags, next))
     } else {
-        let tags = parse_tags_classic(&mut cursor, count, source, header.byte_order, budgets)?;
+        let tags = parse_tags_classic(
+            &mut cursor,
+            count,
+            source,
+            header.byte_order,
+            budgets,
+            usage,
+        )?;
         let next = cursor.read_u32()? as u64;
         Ok((tags, next))
     }
@@ -855,6 +908,7 @@ fn parse_tags_classic(
     source: &dyn TiffSource,
     byte_order: ByteOrder,
     budgets: ParseBudgets,
+    usage: &mut ParseBudgetUsage,
 ) -> Result<Vec<Tag>> {
     let mut tags = Vec::with_capacity(count);
     for _ in 0..count {
@@ -862,6 +916,9 @@ fn parse_tags_classic(
         let type_code = cursor.read_u16()?;
         let value_count = cursor.read_u32()? as u64;
         let value_offset_bytes = cursor.read_bytes(4)?;
+        let value_bytes =
+            checked_tag_value_byte_len(code, type_code, value_count, budgets.max_tag_value_bytes)?;
+        usage.consume_tag_value_bytes(code, value_bytes, budgets)?;
         let tag = parse_tag_classic(
             code,
             type_code,
@@ -884,6 +941,7 @@ fn parse_tags_bigtiff(
     source: &dyn TiffSource,
     byte_order: ByteOrder,
     budgets: ParseBudgets,
+    usage: &mut ParseBudgetUsage,
 ) -> Result<Vec<Tag>> {
     let mut tags = Vec::with_capacity(count);
     for _ in 0..count {
@@ -891,6 +949,9 @@ fn parse_tags_bigtiff(
         let type_code = cursor.read_u16()?;
         let value_count = cursor.read_u64()?;
         let value_offset_bytes = cursor.read_bytes(8)?;
+        let value_bytes =
+            checked_tag_value_byte_len(code, type_code, value_count, budgets.max_tag_value_bytes)?;
+        usage.consume_tag_value_bytes(code, value_bytes, budgets)?;
         let tag = parse_tag_bigtiff(
             code,
             type_code,

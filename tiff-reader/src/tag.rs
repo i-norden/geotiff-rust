@@ -16,8 +16,7 @@ pub fn parse_tag_classic(
     max_value_bytes: usize,
 ) -> Result<Tag> {
     let tag_type = TagType::from_code(type_code);
-    let total_size = value_len(code, count, tag_type.element_size())?;
-    validate_value_budget(code, total_size, max_value_bytes)?;
+    let total_size = checked_value_len_for_type(code, count, tag_type, max_value_bytes)?;
 
     let owned;
     let value_bytes = if total_size <= 4 {
@@ -51,8 +50,7 @@ pub fn parse_tag_bigtiff(
     max_value_bytes: usize,
 ) -> Result<Tag> {
     let tag_type = TagType::from_code(type_code);
-    let total_size = value_len(code, count, tag_type.element_size())?;
-    validate_value_budget(code, total_size, max_value_bytes)?;
+    let total_size = checked_value_len_for_type(code, count, tag_type, max_value_bytes)?;
 
     let owned;
     let value_bytes = if total_size <= 8 {
@@ -73,6 +71,26 @@ pub fn parse_tag_bigtiff(
         count,
         value,
     })
+}
+
+pub(crate) fn checked_tag_value_byte_len(
+    tag: u16,
+    type_code: u16,
+    count: u64,
+    max_value_bytes: usize,
+) -> Result<usize> {
+    checked_value_len_for_type(tag, count, TagType::from_code(type_code), max_value_bytes)
+}
+
+fn checked_value_len_for_type(
+    tag: u16,
+    count: u64,
+    tag_type: TagType,
+    max_value_bytes: usize,
+) -> Result<usize> {
+    let total_size = value_len(tag, count, tag_type.element_size())?;
+    validate_value_budget(tag, total_size, max_value_bytes)?;
+    Ok(total_size)
 }
 
 fn read_value_bytes(source: &dyn TiffSource, offset: u64, len: usize) -> Result<Vec<u8>> {

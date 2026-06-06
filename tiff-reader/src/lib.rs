@@ -66,7 +66,7 @@ pub struct OpenOptions {
     pub block_cache_bytes: usize,
     /// Maximum number of cached strips/tiles.
     pub block_cache_slots: usize,
-    /// Maximum number of IFDs, tag entries, and tag-value bytes parsed from metadata.
+    /// Maximum IFDs, tag entries, and per-tag/aggregate tag-value bytes parsed from metadata.
     pub parse_budgets: ParseBudgets,
 }
 
@@ -1613,6 +1613,39 @@ mod tests {
         };
         assert!(
             matches!(err, Error::InvalidTagValue { tag: 256, reason } if reason.contains("parse budget"))
+        );
+    }
+
+    #[test]
+    fn bigtiff_tag_value_bytes_respect_aggregate_parse_budget() {
+        let mut data = bigtiff_header(16);
+        data.extend_from_slice(&le_u64(2));
+        data.extend_from_slice(&le_u16(65000));
+        data.extend_from_slice(&le_u16(1));
+        data.extend_from_slice(&le_u64(8));
+        data.extend_from_slice(&[0x11; 8]);
+        data.extend_from_slice(&le_u16(65001));
+        data.extend_from_slice(&le_u16(1));
+        data.extend_from_slice(&le_u64(8));
+        data.extend_from_slice(&[0x22; 8]);
+        data.extend_from_slice(&le_u64(0));
+
+        let err = match TiffFile::from_bytes_with_options(
+            data,
+            OpenOptions {
+                parse_budgets: ParseBudgets {
+                    max_tag_value_bytes: 8,
+                    max_metadata_value_bytes: 8,
+                    ..ParseBudgets::default()
+                },
+                ..OpenOptions::default()
+            },
+        ) {
+            Ok(_) => panic!("expected aggregate parse budget error"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, Error::InvalidTagValue { tag: 65001, reason } if reason.contains("aggregate metadata"))
         );
     }
 
