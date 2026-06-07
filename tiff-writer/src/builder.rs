@@ -248,14 +248,14 @@ impl ImageBuilder {
 
     /// Checked total number of blocks (strips or tiles) for this image configuration.
     pub fn checked_block_count(&self) -> crate::error::Result<usize> {
-        let blocks_per_plane = match self.layout {
+        let blocks_per_plane = match self.checked_layout()? {
             DataLayout::Strips { rows_per_strip } => {
-                let rps = rows_per_strip.max(1) as usize;
+                let rps = rows_per_strip as usize;
                 (self.height as usize).div_ceil(rps)
             }
             DataLayout::Tiles { width, height } => {
-                let tw = width.max(1) as usize;
-                let th = height.max(1) as usize;
+                let tw = width as usize;
+                let th = height as usize;
                 let tiles_across = (self.width as usize).div_ceil(tw);
                 let tiles_down = (self.height as usize).div_ceil(th);
                 tiles_across
@@ -282,9 +282,9 @@ impl ImageBuilder {
     pub fn checked_block_sample_count(&self, index: usize) -> crate::error::Result<usize> {
         let samples_per_pixel = self.block_samples_per_pixel() as usize;
         let plane_block_index = self.checked_block_plane_index(index)?;
-        match self.layout {
+        match self.checked_layout()? {
             DataLayout::Strips { rows_per_strip } => {
-                let rps = rows_per_strip.max(1) as usize;
+                let rps = rows_per_strip as usize;
                 let start_row = plane_block_index
                     .checked_mul(rps)
                     .ok_or_else(|| layout_overflow("strip start row"))?;
@@ -334,19 +334,21 @@ impl ImageBuilder {
 
     /// Build the layout-specific tags (RowsPerStrip or TileWidth/TileLength).
     pub fn layout_tags(&self) -> Vec<Tag> {
-        match self.layout {
-            DataLayout::Strips { rows_per_strip } => {
-                vec![Tag::new(
-                    TAG_ROWS_PER_STRIP,
-                    TagValue::Long(vec![rows_per_strip]),
-                )]
-            }
-            DataLayout::Tiles { width, height } => {
-                vec![
-                    Tag::new(TAG_TILE_WIDTH, TagValue::Long(vec![width])),
-                    Tag::new(TAG_TILE_LENGTH, TagValue::Long(vec![height])),
-                ]
-            }
+        self.checked_layout_tags()
+            .expect("ImageBuilder::layout_tags requires a validated layout")
+    }
+
+    /// Checked build of the layout-specific tags.
+    pub fn checked_layout_tags(&self) -> crate::error::Result<Vec<Tag>> {
+        match self.checked_layout()? {
+            DataLayout::Strips { rows_per_strip } => Ok(vec![Tag::new(
+                TAG_ROWS_PER_STRIP,
+                TagValue::Long(vec![rows_per_strip]),
+            )]),
+            DataLayout::Tiles { width, height } => Ok(vec![
+                Tag::new(TAG_TILE_WIDTH, TagValue::Long(vec![width])),
+                Tag::new(TAG_TILE_LENGTH, TagValue::Long(vec![height])),
+            ]),
         }
     }
 
@@ -362,9 +364,8 @@ impl ImageBuilder {
         if let Some(lerc_tag) = self.lerc_parameters_tag() {
             extra_tags.push(lerc_tag);
         }
-        let extra_samples = self
-            .effective_extra_samples()
-            .expect("ImageBuilder::build_tags requires a validated color model");
+        self.validate()?;
+        let extra_samples = self.effective_extra_samples()?;
         if !extra_samples.is_empty() {
             extra_tags.push(Tag::new(
                 TAG_EXTRA_SAMPLES,
@@ -400,7 +401,7 @@ impl ImageBuilder {
         }
 
         let (offsets_tag_code, byte_counts_tag_code) = self.offset_tag_codes();
-        let layout_tags = self.layout_tags();
+        let layout_tags = self.checked_layout_tags()?;
 
         Ok(encoder::build_image_tags(&encoder::ImageTagParams {
             width: self.width,
@@ -459,14 +460,14 @@ impl ImageBuilder {
     }
 
     fn checked_blocks_per_plane(&self) -> crate::error::Result<usize> {
-        match self.layout {
+        match self.checked_layout()? {
             DataLayout::Strips { rows_per_strip } => {
-                let rps = rows_per_strip.max(1) as usize;
+                let rps = rows_per_strip as usize;
                 Ok((self.height as usize).div_ceil(rps))
             }
             DataLayout::Tiles { width, height } => {
-                let tw = width.max(1) as usize;
-                let th = height.max(1) as usize;
+                let tw = width as usize;
+                let th = height as usize;
                 let tiles_across = (self.width as usize).div_ceil(tw);
                 let tiles_down = (self.height as usize).div_ceil(th);
                 tiles_across
@@ -569,6 +570,27 @@ impl ImageBuilder {
             self.validate_jpeg_config()?;
         }
         Ok(())
+    }
+
+    fn checked_layout(&self) -> crate::error::Result<DataLayout> {
+        match self.layout {
+            DataLayout::Strips { rows_per_strip: 0 } => Err(crate::error::Error::InvalidConfig(
+                "rows_per_strip must be greater than zero".into(),
+            )),
+            DataLayout::Tiles { width, height } if width == 0 || height == 0 => {
+                Err(crate::error::Error::InvalidConfig(format!(
+                    "tile_width and tile_height must be greater than zero, got {}x{}",
+                    width, height
+                )))
+            }
+            DataLayout::Tiles { width, height } if width % 16 != 0 || height % 16 != 0 => {
+                Err(crate::error::Error::InvalidConfig(format!(
+                    "tile dimensions must be multiples of 16, got {}x{}",
+                    width, height
+                )))
+            }
+            layout => Ok(layout),
+        }
     }
 
     fn validate_color_model(&self) -> crate::error::Result<()> {
@@ -817,6 +839,69 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("tile_width") && message.contains("tile_height"))
+        );
+    }
+
+    #[test]
+    fn checked_helpers_reject_zero_strip_and_tile_dimensions() {
+        let builder = ImageBuilder::new(16, 16).strips(0);
+        let err = builder.checked_block_count().unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("rows_per_strip"))
+        );
+        let err = builder.checked_layout_tags().unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("rows_per_strip"))
+        );
+        let err = builder.checked_build_tags(false).unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("rows_per_strip"))
+        );
+
+        let builder = ImageBuilder::new(16, 16).tiles(0, 16);
+        let err = builder.checked_block_count().unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("tile_width"))
+        );
+        let err = builder.checked_layout_tags().unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("tile_width"))
+        );
+        let err = builder.checked_build_tags(false).unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("tile_width"))
+        );
+
+        let builder = ImageBuilder::new(16, 16).tiles(16, 0);
+        let err = builder.checked_block_count().unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("tile_height"))
+        );
+        let err = builder.checked_layout_tags().unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("tile_height"))
+        );
+        let err = builder.checked_build_tags(false).unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("tile_height"))
+        );
+
+        let builder = ImageBuilder::new(16, 16).tiles(15, 16);
+        let err = builder.checked_layout_tags().unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("multiples of 16"))
+        );
+    }
+
+    #[test]
+    fn checked_build_tags_returns_color_model_errors() {
+        let err = ImageBuilder::new(16, 16)
+            .photometric(tiff_core::PhotometricInterpretation::Rgb)
+            .samples_per_pixel(1)
+            .checked_build_tags(false)
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("requires at least 3 samples"))
         );
     }
 
