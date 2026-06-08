@@ -27,8 +27,8 @@ cargo doc --workspace --all-features --no-deps
 ./scripts/seed-fuzz-corpus.sh
 git diff --exit-code -- fuzz/corpus
 git status --short -- fuzz/corpus
-cargo check --manifest-path fuzz/Cargo.toml --bins
-cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings
+cargo check --manifest-path fuzz/Cargo.toml --bins --locked
+cargo clippy --manifest-path fuzz/Cargo.toml --bins --locked -- -D warnings
 (
   cd fuzz
   cargo fuzz run tiff_open corpus/tiff_open -- -max_total_time=60
@@ -47,7 +47,7 @@ cargo publish -p <crate>
 
 Cargo verifies package tarballs using registry dependencies rather than local
 path dependencies, so dependent crates cannot complete a full `cargo package`
-verification until their internal `0.5.0` dependencies are available on
+verification until their internal `0.6.0` dependencies are available on
 crates.io.
 
 Before those internal versions are live, you can still locally verify the

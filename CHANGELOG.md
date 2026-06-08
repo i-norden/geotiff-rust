@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.6.0 - 2026-06-08
+
+- add TIFF reader parse budgets through `OpenOptions`, bounding IFD chain length, per-IFD tag entries, per-tag value bytes, and aggregate metadata value bytes
+- bound strip/tile payload reads before source access and enforce decompressed block budgets across Deflate, LZW, PackBits, JPEG, ZSTD, LERC, `LERC+DEFLATE`, and `LERC+ZSTD`
+- reject oversized BigTIFF `LONG8` scalar dimensions, zero strip/tile dimensions, oversized TIFF block byte counts, and LERC payloads that conflict with TIFF metadata
+- fix TIFF LERC writer metadata to use the registered LERC2 2.4 parameter version and reject incompatible encoder output versions before writing
+- emit GeoTIFF 1.1 GeoKey directory minor revision by default, preserving legacy 1.0 only when compatible and promoting vertical GeoKeys to 1.1
+- validate writer strip/tile dimensions, block counts, sample counts, and estimated byte counts for zero values and overflow, and deprecate legacy infallible `ImageBuilder` helpers after making them best-effort instead of panicking on invalid builders
+- pin release CI toolchains and runners, build cargo-fuzz with Rust 1.85, and add regression coverage for metadata budgets, block budgets, writer layout checks, and GDAL LERC version compatibility
+
 ## 0.5.0 - 2026-05-17
 
 - add storage-domain single-band read APIs to `tiff-reader` and `geotiff-reader`, including full-image and windowed reads that return `[rows, cols]` arrays
