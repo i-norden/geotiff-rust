@@ -111,6 +111,7 @@ with `bands(...)` and optional
 - Chunky and separate planar sample layouts
 - Full-raster and windowed single-band reads, optimized for separate-planar rasters
 - Compression: Deflate, LZW, PackBits, LERC, LERC+DEFLATE, JPEG (optional), ZSTD (optional), LERC+ZSTD (optional)
+- Bounded IFD parsing and block decompression budgets for untrusted input
 - Parallel decompression via Rayon
 - Storage-domain typed sample reads via `read_*` / `read_*_samples`
 - Explicit decoded pixel reads via `read_decoded_*` for standard TIFF color models, including palette expansion, YCbCr/CMYK conversion, and sub-byte grayscale/palette decode
@@ -127,7 +128,7 @@ with `bands(...)` and optional
 - Chunky and separate planar multi-band layouts and all sample types (u8 through f64)
 - Photometric/color-model tags: palette `ColorMap`, `ExtraSamples` alpha, CMYK (`Separated` + `InkSet`), and YCbCr 4:4:4
 - Streaming tile-by-tile GeoTIFF writes for large rasters
-- GeoTIFF metadata: projected/geographic/geocentric/vertical compound CRS keys, pixel scale, origin, affine transforms, NoData
+- GeoTIFF metadata: GeoTIFF 1.1 key-directory emission, projected/geographic/geocentric/vertical compound CRS keys, pixel scale, origin, affine transforms, NoData
 - COG output with GDAL-compatible ghost-area metadata, overview generation (nearest-neighbor, average), top-level or SubIFD-backed overview IFDs, and multi-band chunky/planar rasters
 - Disk-backed tile-wise COG assembly via `CogTileWriter` (base tiles are staged in a temporary raw tile store before final emission)
 
@@ -138,6 +139,20 @@ interchange streams per strip/tile. The supported interoperable layouts are
 single-band chunky output and multi-band separate-planar output, which keeps
 TIFF, GeoTIFF, and COG files compatible with GDAL/libtiff without requiring
 TIFF-side shared `JPEGTables`.
+
+TIFF `LERC` writing records the registered LERC2 2.4 parameter version used by
+GDAL/libtiff. If the encoder produces a different LERC2 container version, the
+writer rejects the block before writing incompatible TIFF metadata.
+
+## Robustness Notes
+
+`TiffFile::open_with_options`, `from_bytes_with_options`, and
+`from_source_with_options` accept `OpenOptions` with `ParseBudgets` for bounding
+IFD chain length, tag counts, and metadata payload bytes. `GeoTiffFile`
+exposes the same settings as `GeoTiffOpenOptions`, and HTTP COG opens pass them
+through `HttpOpenOptions::tiff_options`. The reader also derives encoded
+strip/tile read limits and decompressed output limits from the raster layout
+before reading block payloads.
 
 ## Feature flags
 
