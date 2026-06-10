@@ -2074,7 +2074,10 @@ mod tests {
             blob.extend_from_slice(&value.to_le_bytes());
         }
 
-        let compressed = zstd::stream::encode_all(std::io::Cursor::new(blob), 0).unwrap();
+        let compressed = ruzstd::encoding::compress_to_vec(
+            &blob[..],
+            ruzstd::encoding::CompressionLevel::Fastest,
+        );
         let data = build_lerc_tiff(2, 2, &compressed, 32, 3, 1, Some([2, 2]));
         let file = TiffFile::from_bytes(data).unwrap();
         let image = file.read_image::<f32>(0).unwrap();

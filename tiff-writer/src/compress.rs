@@ -446,11 +446,11 @@ fn compress_jpeg(
 }
 
 #[cfg(feature = "zstd")]
-fn compress_zstd(data: &[u8], index: usize) -> Result<Vec<u8>> {
-    zstd::stream::encode_all(std::io::Cursor::new(data), 3).map_err(|e| Error::CompressionFailed {
-        index,
-        reason: format!("ZSTD: {e}"),
-    })
+fn compress_zstd(data: &[u8], _index: usize) -> Result<Vec<u8>> {
+    Ok(ruzstd::encoding::compress_to_vec(
+        std::io::Cursor::new(data),
+        ruzstd::encoding::CompressionLevel::Fastest,
+    ))
 }
 
 #[cfg(test)]
@@ -495,7 +495,10 @@ mod tests {
     fn roundtrip_zstd() {
         let data: Vec<u8> = (0..256).map(|i| (i % 256) as u8).collect();
         let compressed = compress(&data, Compression::Zstd, 0).unwrap();
-        let decompressed = zstd::stream::decode_all(std::io::Cursor::new(&compressed)).unwrap();
+        let mut decoder =
+            ruzstd::decoding::StreamingDecoder::new(std::io::Cursor::new(&compressed)).unwrap();
+        let mut decompressed = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut decompressed).unwrap();
         assert_eq!(decompressed, data);
     }
 
