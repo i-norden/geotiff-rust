@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.6.1 - 2026-06-10
+
+- replace C-backed TIFF ZSTD read/write dependencies with pure-Rust `ruzstd` for `ZSTD` and `LERC+ZSTD` blocks
+- disable reqwest TLS features for COG reads so the default dependency graph does not include native TLS, `ring`, or `aws-lc`
+- regenerate `fuzz/Cargo.lock` so locked fuzz checks use the same `ruzstd` dependency graph as the workspace
+
 ## 0.6.0 - 2026-06-08
 
 - add TIFF reader parse budgets through `OpenOptions`, bounding IFD chain length, per-IFD tag entries, per-tag value bytes, and aggregate metadata value bytes

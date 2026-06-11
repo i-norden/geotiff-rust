@@ -338,11 +338,11 @@ dependencies = [
 
 [[package]]
 name = "geotiff-core"
-version = "0.6.0"
+version = "0.6.1"
 
 [[package]]
 name = "geotiff-integration"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "criterion",
  "geotiff-core",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "geotiff-reader"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "geotiff-core",
  "lru",
@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "geotiff-writer"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "geotiff-core",
  "ndarray",
@@ -1324,14 +1324,14 @@ dependencies = [
 
 [[package]]
 name = "tiff-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "tiff-integration"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "criterion",
  "ndarray",
@@ -1344,7 +1344,7 @@ dependencies = [
 
 [[package]]
 name = "tiff-reader"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "flate2",
  "jpeg-decoder",
@@ -1364,7 +1364,7 @@ dependencies = [
 
 [[package]]
 name = "tiff-writer"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "flate2",
  "jpeg-encoder",
