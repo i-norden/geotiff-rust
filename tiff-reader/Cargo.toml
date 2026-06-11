@@ -29,7 +29,7 @@ smallvec = "1"
 default = ["rayon", "jpeg", "zstd"]
 rayon = ["dep:rayon"]
 jpeg = ["dep:jpeg-decoder"]
-zstd = ["dep:zstd"]
+zstd = ["dep:ruzstd"]
 
 [dependencies.rayon]
 version = "1"
@@ -39,7 +39,6 @@ optional = true
 version = "0.3"
 optional = true
 
-[dependencies.zstd]
-version = "0.13"
-default-features = false
+[dependencies.ruzstd]
+version = "0.8.3"
 optional = true

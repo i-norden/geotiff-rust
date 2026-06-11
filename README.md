@@ -161,7 +161,7 @@ before reading block payloads.
 | `local` | yes | Local file reading via `tiff-reader` (geotiff-reader) |
 | `rayon` | yes | Parallel strip/tile decompression (tiff-reader, geotiff-reader) |
 | `jpeg` | yes | JPEG-in-TIFF read/write support (tiff-reader, tiff-writer) |
-| `zstd` | yes | ZSTD compression, including TIFF `LERC+ZSTD` read/write support (tiff-reader, tiff-writer) |
+| `zstd` | yes | Pure-Rust ZSTD compression via `ruzstd`, including TIFF `LERC+ZSTD` read/write support (tiff-reader, tiff-writer) |
 | `cog` | no | HTTP range-backed remote COG open (geotiff-reader) |
 
 ## Testing

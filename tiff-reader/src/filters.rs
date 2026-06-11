@@ -255,10 +255,10 @@ fn validate_jpeg_metadata_budget<R: std::io::Read>(
 
 #[cfg(feature = "zstd")]
 fn decompress_zstd(data: &[u8], index: usize, decoded_len_limit: usize) -> Result<Vec<u8>> {
-    let decoder = zstd::stream::read::Decoder::new(Cursor::new(data)).map_err(|e| {
+    let decoder = ruzstd::decoding::StreamingDecoder::new(Cursor::new(data)).map_err(|error| {
         Error::DecompressionFailed {
             index,
-            reason: format!("ZSTD: {e}"),
+            reason: format!("ZSTD: {error}"),
         }
     })?;
     read_bounded_to_end(decoder, index, "ZSTD", decoded_len_limit)
@@ -599,7 +599,10 @@ mod tests {
     #[test]
     fn zstd_decoder_rejects_blocks_that_exceed_budget() {
         let payload = [0x2a; 128];
-        let compressed = zstd::stream::encode_all(&payload[..], 0).unwrap();
+        let compressed = ruzstd::encoding::compress_to_vec(
+            &payload[..],
+            ruzstd::encoding::CompressionLevel::Fastest,
+        );
 
         let err = decompress(Compression::Zstd.to_code(), &compressed, 0, None, 127).unwrap_err();
         assert!(err.to_string().contains("block budget"));
