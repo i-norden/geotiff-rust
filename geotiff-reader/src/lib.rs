@@ -93,6 +93,32 @@ impl GeoTiffFile {
         Self::from_tiff(tiff)
     }
 
+    /// Open a GeoTIFF file from disk using memory-mapped I/O.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that the mapped file is not mutated or
+    /// truncated while the returned `GeoTiffFile` is alive. This includes
+    /// writes through other file handles and writes from other processes.
+    pub unsafe fn open_mmap<P: AsRef<Path>>(path: P) -> Result<Self> {
+        unsafe { Self::open_mmap_with_options(path, TiffOpenOptions::default()) }
+    }
+
+    /// Open a GeoTIFF file from disk using memory-mapped I/O with explicit TIFF decoder options.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that the mapped file is not mutated or
+    /// truncated while the returned `GeoTiffFile` is alive. This includes
+    /// writes through other file handles and writes from other processes.
+    pub unsafe fn open_mmap_with_options<P: AsRef<Path>>(
+        path: P,
+        options: GeoTiffOpenOptions,
+    ) -> Result<Self> {
+        let tiff = unsafe { TiffFile::open_mmap_with_options(path, options)? };
+        Self::from_tiff(tiff)
+    }
+
     /// Open a GeoTIFF from an owned byte buffer.
     pub fn from_bytes(data: Vec<u8>) -> Result<Self> {
         Self::from_bytes_with_options(data, TiffOpenOptions::default())
