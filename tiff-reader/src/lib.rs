@@ -1617,6 +1617,21 @@ mod tests {
         assert!(file.raw_bytes().is_none());
         assert_eq!(file.read_image_bytes(0).unwrap(), vec![7]);
 
+        drop(file);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn open_mmap_exposes_raw_slice() {
+        let bytes = build_stripped_tiff(1, 1, &[7], &[]);
+        let path = temp_tiff_path("open_mmap_exposes_raw_slice");
+        fs::write(&path, &bytes).unwrap();
+
+        let file = unsafe { TiffFile::open_mmap(&path).unwrap() };
+        assert_eq!(file.raw_bytes(), Some(bytes.as_slice()));
+        assert_eq!(file.read_image_bytes(0).unwrap(), vec![7]);
+
+        drop(file);
         let _ = fs::remove_file(path);
     }
 
