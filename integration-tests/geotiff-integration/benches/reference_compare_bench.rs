@@ -12,7 +12,9 @@ use tempfile::NamedTempFile;
 #[path = "../../../test-support/reference.rs"]
 mod reference;
 
+// Keep the historical benchmark ID on mmap so CI guards compare like-for-like.
 const RUST_IMPL_NAME: &str = "geotiff-rust";
+const RUST_FILE_IMPL_NAME: &str = "geotiff-rust-file";
 const REFERENCE_IMPL_NAME: &str = "gdal";
 
 fn write_multiband_planar_cog_fixture(path: &Path) {
@@ -98,13 +100,30 @@ fn bench_open_and_full_decode_multiband_planar_cog(c: &mut Criterion) {
             let iterations = usize::try_from(iters).expect("criterion iteration count overflowed");
             let start = Instant::now();
             for _ in 0..iterations {
-                let file = GeoTiffFile::open(fixture.path()).unwrap();
+                let file = unsafe { GeoTiffFile::open_mmap(fixture.path()).unwrap() };
                 let raster: ArrayD<u16> = file.read_raster().unwrap();
                 black_box(raster);
             }
             start.elapsed()
         });
     });
+
+    group.bench_function(
+        BenchmarkId::new(RUST_FILE_IMPL_NAME, "geotiff-reader"),
+        |b| {
+            b.iter_custom(|iters| {
+                let iterations =
+                    usize::try_from(iters).expect("criterion iteration count overflowed");
+                let start = Instant::now();
+                for _ in 0..iterations {
+                    let file = GeoTiffFile::open(fixture.path()).unwrap();
+                    let raster: ArrayD<u16> = file.read_raster().unwrap();
+                    black_box(raster);
+                }
+                start.elapsed()
+            });
+        },
+    );
 
     group.bench_function(
         BenchmarkId::new(REFERENCE_IMPL_NAME, "geotiff-reader"),

@@ -13,14 +13,14 @@
 [![geotiff-writer crates.io](https://img.shields.io/crates/v/geotiff-writer.svg)](https://crates.io/crates/geotiff-writer)
 [![geotiff-writer docs.rs](https://docs.rs/geotiff-writer/badge.svg)](https://docs.rs/geotiff-writer)
 
-Pure-Rust TIFF/BigTIFF and GeoTIFF/COG readers and writers. No C libraries, no build scripts, no unsafe beyond `memmap2`.
+Pure-Rust TIFF/BigTIFF and GeoTIFF/COG readers and writers. No C libraries, no build scripts; unsafe is limited to explicitly opt-in `memmap2` reading.
 
 ## Crates
 
 | Crate | Description |
 |---|---|
 | `tiff-core` | Shared TIFF types: ByteOrder, tags, sample traits, compression/predictor enums, and color-model metadata |
-| `tiff-reader` | TIFF/BigTIFF decoder with mmap, strip/tile reads, storage-domain reads, and explicit decoded pixel access |
+| `tiff-reader` | TIFF/BigTIFF decoder with safe file-backed random access, opt-in mmap, strip/tile reads, storage-domain reads, and explicit decoded pixel access |
 | `tiff-writer` | TIFF/BigTIFF encoder with streaming writes, compression, predictors, and BigTIFF |
 | `geotiff-core` | Shared GeoTIFF types: GeoKeyDirectory, CRS, GeoTransform, tag constants |
 | `geotiff-reader` | GeoTIFF reader with CRS/transform extraction, overview discovery, and optional HTTP COG access |
@@ -153,6 +153,11 @@ exposes the same settings as `GeoTiffOpenOptions`, and HTTP COG opens pass them
 through `HttpOpenOptions::tiff_options`. The reader also derives encoded
 strip/tile read limits and decompressed output limits from the raster layout
 before reading block payloads.
+
+Local `open` constructors use safe file-backed random access by default.
+Memory-mapped local opens are available through `unsafe` `open_mmap`
+constructors when the caller can guarantee that the mapped file will not be
+mutated or truncated while it is open.
 
 ## Feature flags
 

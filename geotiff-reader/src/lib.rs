@@ -93,6 +93,32 @@ impl GeoTiffFile {
         Self::from_tiff(tiff)
     }
 
+    /// Open a GeoTIFF file from disk using memory-mapped I/O.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that the mapped file is not mutated or
+    /// truncated while the returned `GeoTiffFile` is alive. This includes
+    /// writes through other file handles and writes from other processes.
+    pub unsafe fn open_mmap<P: AsRef<Path>>(path: P) -> Result<Self> {
+        unsafe { Self::open_mmap_with_options(path, TiffOpenOptions::default()) }
+    }
+
+    /// Open a GeoTIFF file from disk using memory-mapped I/O with explicit TIFF decoder options.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that the mapped file is not mutated or
+    /// truncated while the returned `GeoTiffFile` is alive. This includes
+    /// writes through other file handles and writes from other processes.
+    pub unsafe fn open_mmap_with_options<P: AsRef<Path>>(
+        path: P,
+        options: GeoTiffOpenOptions,
+    ) -> Result<Self> {
+        let tiff = unsafe { TiffFile::open_mmap_with_options(path, options)? };
+        Self::from_tiff(tiff)
+    }
+
     /// Open a GeoTIFF from an owned byte buffer.
     pub fn from_bytes(data: Vec<u8>) -> Result<Self> {
         Self::from_bytes_with_options(data, TiffOpenOptions::default())
@@ -665,6 +691,10 @@ fn parse_nodata(ifd: &tiff_reader::Ifd) -> Option<String> {
 #[cfg(test)]
 #[cfg(feature = "local")]
 mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use super::GeoTiffFile;
 
     #[derive(Clone)]
@@ -683,6 +713,17 @@ mod tests {
 
     fn le_f64(value: f64) -> [u8; 8] {
         value.to_le_bytes()
+    }
+
+    fn temp_geotiff_path(test_name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "geotiff-rust-{test_name}-{}-{nanos}.tif",
+            std::process::id()
+        ))
     }
 
     fn inline_short(value: u16) -> Vec<u8> {
@@ -1238,6 +1279,25 @@ mod tests {
         let (values, offset) = raster.into_raw_vec_and_offset();
         assert_eq!(offset, Some(0));
         assert_eq!(values, vec![10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn open_mmap_reads_geotiff_from_file() {
+        let bytes = build_simple_geotiff(false);
+        let path = temp_geotiff_path("open_mmap_reads_geotiff_from_file");
+        fs::write(&path, &bytes).unwrap();
+
+        let file = unsafe { GeoTiffFile::open_mmap(&path).unwrap() };
+        assert_eq!(file.epsg(), Some(4326));
+        assert_eq!(file.tiff().raw_bytes(), Some(bytes.as_slice()));
+
+        let raster = file.read_raster::<u8>().unwrap();
+        let (values, offset) = raster.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(values, vec![10, 20, 30, 40]);
+
+        drop(file);
+        let _ = fs::remove_file(path);
     }
 
     #[test]

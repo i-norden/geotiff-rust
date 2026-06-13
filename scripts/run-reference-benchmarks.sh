@@ -12,6 +12,7 @@ docker run --rm \
     -w /workspace \
     "$image_name" \
     bash -c '
-        cargo bench -p tiff-reader --bench reference_compare_bench
-        cargo bench -p geotiff-reader --bench reference_compare_bench
+        cargo bench -p tiff-integration --bench reference_compare_bench
+        cargo bench -p geotiff-integration --bench reference_compare_bench
+        cargo bench -p geotiff-integration --bench geotiff_reader_reference_compare_bench
     '

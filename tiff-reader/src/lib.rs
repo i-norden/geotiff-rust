@@ -3,7 +3,7 @@
 //! Supports:
 //! - **TIFF** (classic): `II`/`MM` byte order mark + version 42
 //! - **BigTIFF**: `II`/`MM` byte order mark + version 43
-//! - **Sources**: mmap, in-memory bytes, or any custom random-access source
+//! - **Sources**: file-backed random access, opt-in mmap, in-memory bytes, or any custom random-access source
 //! - **Reads**: full rasters, windows, and single storage-domain bands
 //! - **Compression**: None, Deflate, LZW, PackBits, LERC, JPEG (feature), ZSTD (feature)
 //!
@@ -46,7 +46,7 @@ use std::sync::Arc;
 use cache::BlockCache;
 use error::{Error, Result};
 use ndarray::{ArrayD, IxDyn};
-use source::{BytesSource, MmapSource, SharedSource, TiffSource};
+use source::{BytesSource, FileSource, MmapSource, SharedSource, TiffSource};
 
 pub use error::Error as TiffError;
 pub use header::ByteOrder;
@@ -80,7 +80,7 @@ impl Default for OpenOptions {
     }
 }
 
-/// A memory-mapped TIFF file handle.
+/// A TIFF file handle.
 pub struct TiffFile {
     source: SharedSource,
     header: header::TiffHeader,
@@ -332,14 +332,40 @@ const GDAL_STRUCTURAL_METADATA_PREFIX: &str = "GDAL_STRUCTURAL_METADATA_SIZE=";
 // TiffSample trait and impls are provided by tiff-core and re-exported above.
 
 impl TiffFile {
-    /// Open a TIFF file from disk using memory-mapped I/O.
+    /// Open a TIFF file from disk using safe file-backed I/O.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         Self::open_with_options(path, OpenOptions::default())
     }
 
-    /// Open a TIFF file from disk with explicit decoder options.
+    /// Open a TIFF file from disk using safe file-backed I/O with explicit decoder options.
     pub fn open_with_options<P: AsRef<Path>>(path: P, options: OpenOptions) -> Result<Self> {
-        let source: SharedSource = Arc::new(MmapSource::open(path.as_ref())?);
+        let source: SharedSource = Arc::new(FileSource::open(path.as_ref())?);
+        Self::from_source_with_options(source, options)
+    }
+
+    /// Open a TIFF file from disk using memory-mapped I/O.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that the mapped file is not mutated or
+    /// truncated while the returned `TiffFile` is alive. This includes writes
+    /// through other file handles and writes from other processes.
+    pub unsafe fn open_mmap<P: AsRef<Path>>(path: P) -> Result<Self> {
+        unsafe { Self::open_mmap_with_options(path, OpenOptions::default()) }
+    }
+
+    /// Open a TIFF file from disk using memory-mapped I/O with explicit decoder options.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that the mapped file is not mutated or
+    /// truncated while the returned `TiffFile` is alive. This includes writes
+    /// through other file handles and writes from other processes.
+    pub unsafe fn open_mmap_with_options<P: AsRef<Path>>(
+        path: P,
+        options: OpenOptions,
+    ) -> Result<Self> {
+        let source: SharedSource = Arc::new(unsafe { MmapSource::open(path.as_ref())? });
         Self::from_source_with_options(source, options)
     }
 
@@ -405,7 +431,10 @@ impl TiffFile {
         &self.ifds
     }
 
-    /// Returns the raw file bytes.
+    /// Returns the raw file bytes when the source exposes a resident immutable slice.
+    ///
+    /// This returns `Some` for in-memory and memory-mapped sources. It returns
+    /// `None` for the default safe file-backed source.
     pub fn raw_bytes(&self) -> Option<&[u8]> {
         self.source.as_slice()
     }
@@ -1023,8 +1052,11 @@ fn parse_gdal_structural_metadata_len(bytes: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
         parse_gdal_structural_metadata, parse_gdal_structural_metadata_len, Error,
@@ -1044,6 +1076,17 @@ mod tests {
 
     fn le_u64(value: u64) -> [u8; 8] {
         value.to_le_bytes()
+    }
+
+    fn temp_tiff_path(test_name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "geotiff-rust-{test_name}-{}-{nanos}.tif",
+            std::process::id()
+        ))
     }
 
     fn bigtiff_header(first_ifd_offset: u64) -> Vec<u8> {
@@ -1563,6 +1606,33 @@ mod tests {
             }
         }
         panic!("tag {tag} not found");
+    }
+
+    #[test]
+    fn open_uses_safe_file_source_without_raw_slice() {
+        let path = temp_tiff_path("open_uses_safe_file_source_without_raw_slice");
+        fs::write(&path, build_stripped_tiff(1, 1, &[7], &[])).unwrap();
+
+        let file = TiffFile::open(&path).unwrap();
+        assert!(file.raw_bytes().is_none());
+        assert_eq!(file.read_image_bytes(0).unwrap(), vec![7]);
+
+        drop(file);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn open_mmap_exposes_raw_slice() {
+        let bytes = build_stripped_tiff(1, 1, &[7], &[]);
+        let path = temp_tiff_path("open_mmap_exposes_raw_slice");
+        fs::write(&path, &bytes).unwrap();
+
+        let file = unsafe { TiffFile::open_mmap(&path).unwrap() };
+        assert_eq!(file.raw_bytes(), Some(bytes.as_slice()));
+        assert_eq!(file.read_image_bytes(0).unwrap(), vec![7]);
+
+        drop(file);
+        let _ = fs::remove_file(path);
     }
 
     #[test]
