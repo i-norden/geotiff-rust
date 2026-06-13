@@ -44,7 +44,9 @@ Notes:
   Deflate-compressed `u16` TIFF fixture generated at benchmark time.
 - The `geotiff-reader` benchmark uses a matching synthetic GeoTIFF fixture with
   `EPSG:32615` metadata.
-- Both benches validate byte length and raster hash equality against the GDAL
+- The `geotiff-writer` decode benchmark uses a synthetic multiband planar COG
+  fixture with internal overviews.
+- The benchmarks validate byte length and raster hash equality against the GDAL
   helper before timing.
 - The comparison target is the repo's Python GDAL helper, not a direct GDAL C API benchmark.
 
