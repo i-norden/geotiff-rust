@@ -1367,6 +1367,17 @@ mod tests {
         tile_height: u32,
         tiles: &[&[u8]],
     ) -> Vec<u8> {
+        build_tiled_tiff_with_overrides(width, height, tile_width, tile_height, tiles, &[])
+    }
+
+    fn build_tiled_tiff_with_overrides(
+        width: u32,
+        height: u32,
+        tile_width: u32,
+        tile_height: u32,
+        tiles: &[&[u8]],
+        overrides: &[(u16, u16, u32, Vec<u8>)],
+    ) -> Vec<u8> {
         let mut entries = BTreeMap::new();
         entries.insert(256, (4, 1, le_u32(width).to_vec()));
         entries.insert(257, (4, 1, le_u32(height).to_vec()));
@@ -1386,6 +1397,9 @@ mod tests {
                     .collect(),
             ),
         );
+        for &(tag, ty, count, ref value) in overrides {
+            entries.insert(tag, (ty, count, value.clone()));
+        }
 
         let ifd_offset = 8u32;
         let ifd_size = 2 + (entries.len() + 1) * 12 + 4;
@@ -1907,6 +1921,24 @@ mod tests {
         let err = file.read_image_bytes(0).unwrap_err();
         assert!(err.to_string().contains("block read budget"));
         assert_eq!(source.reads(), 0);
+    }
+
+    #[test]
+    fn huge_planar_tile_count_overflow_is_rejected_without_panicking() {
+        let data = build_tiled_tiff_with_overrides(
+            u32::MAX,
+            u32::MAX,
+            1,
+            1,
+            &[&[0]],
+            &[(277, 3, 1, inline_short(2)), (284, 3, 1, inline_short(2))],
+        );
+        let file = TiffFile::from_bytes(data).unwrap();
+
+        let err = file.read_window_bytes(0, 0, 0, 1, 1).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidImageLayout(message) if message.contains("tile count"))
+        );
     }
 
     #[test]
