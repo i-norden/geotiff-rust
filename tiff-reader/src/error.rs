@@ -48,6 +48,12 @@ pub enum Error {
     #[error("decompression failed for strip/tile {index}: {reason}")]
     DecompressionFailed { index: usize, reason: String },
 
+    #[error("decoded output byte length {requested} exceeds decode output budget {limit}")]
+    DecodeOutputTooLarge { requested: usize, limit: usize },
+
+    #[error("failed to allocate {requested} decoded output bytes: {reason}")]
+    DecodeOutputAllocationFailed { requested: usize, reason: String },
+
     #[error("data truncated at offset {offset}: need {needed} bytes, have {available}")]
     Truncated {
         offset: u64,

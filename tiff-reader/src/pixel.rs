@@ -1,5 +1,6 @@
 use crate::error::{Error, Result};
 use crate::ifd::Ifd;
+use crate::{allocate_decode_output_capacity, copy_decode_output};
 use tiff_core::{ColorMap, ColorModel, Compression, RasterLayout};
 
 pub(crate) fn decode_pixels(
@@ -8,6 +9,7 @@ pub(crate) fn decode_pixels(
     width: usize,
     height: usize,
     sample_bytes: &[u8],
+    decode_output_bytes: usize,
 ) -> Result<(RasterLayout, Vec<u8>)> {
     let decoded_layout = ifd.decoded_raster_layout()?;
     let decoded_layout = RasterLayout {
@@ -17,7 +19,10 @@ pub(crate) fn decode_pixels(
     };
     let color_model = ifd.color_model()?;
     if can_passthrough(ifd, &color_model, storage_layout, &decoded_layout) {
-        return Ok((decoded_layout, sample_bytes.to_vec()));
+        return Ok((
+            decoded_layout,
+            copy_decode_output(sample_bytes, decode_output_bytes)?,
+        ));
     }
 
     let pixel_count = width
@@ -37,14 +42,13 @@ pub(crate) fn decode_pixels(
         )));
     }
 
-    let mut out = Vec::with_capacity(
-        pixel_count
-            .checked_mul(decoded_layout.samples_per_pixel)
-            .and_then(|samples| samples.checked_mul(decoded_layout.bytes_per_sample))
-            .ok_or_else(|| {
-                Error::InvalidImageLayout("decoded output buffer length overflows usize".into())
-            })?,
-    );
+    let output_len = pixel_count
+        .checked_mul(decoded_layout.samples_per_pixel)
+        .and_then(|samples| samples.checked_mul(decoded_layout.bytes_per_sample))
+        .ok_or_else(|| {
+            Error::InvalidImageLayout("decoded output buffer length overflows usize".into())
+        })?;
+    let mut out = allocate_decode_output_capacity(output_len, decode_output_bytes)?;
 
     match color_model {
         ColorModel::Grayscale {
@@ -200,7 +204,10 @@ pub(crate) fn decode_pixels(
         }
         ColorModel::YCbCr { extra_samples, .. } => {
             if Compression::from_code(ifd.compression()) == Some(Compression::Jpeg) {
-                return Ok((decoded_layout, sample_bytes.to_vec()));
+                return Ok((
+                    decoded_layout,
+                    copy_decode_output(sample_bytes, decode_output_bytes)?,
+                ));
             }
             let reference_black_white = ifd
                 .reference_black_white()?

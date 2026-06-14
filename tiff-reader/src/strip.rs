@@ -11,7 +11,10 @@ use crate::error::{Error, Result};
 use crate::header::ByteOrder;
 use crate::ifd::{Ifd, RasterLayout};
 use crate::source::TiffSource;
-use crate::{read_block_payload, read_gdal_block_payload, GdalStructuralMetadata, Window};
+use crate::{
+    allocate_decode_output, read_block_payload, read_gdal_block_payload, DecodeReadOptions,
+    GdalStructuralMetadata, Window,
+};
 
 const TAG_JPEG_TABLES: u16 = 347;
 
@@ -21,7 +24,7 @@ pub(crate) fn read_window(
     byte_order: ByteOrder,
     cache: &BlockCache,
     window: Window,
-    gdal_structural_metadata: Option<&GdalStructuralMetadata>,
+    options: DecodeReadOptions<'_>,
 ) -> Result<Vec<u8>> {
     let layout = ifd.raster_layout()?;
     if window.is_empty() {
@@ -29,7 +32,7 @@ pub(crate) fn read_window(
     }
 
     let output_len = window.output_len(&layout)?;
-    let mut output = vec![0u8; output_len];
+    let mut output = allocate_decode_output(output_len, options.decode_output_bytes)?;
     let window_row_end = window.row_end();
     let output_row_bytes = window.cols * layout.pixel_stride_bytes();
 
@@ -46,7 +49,7 @@ pub(crate) fn read_window(
                 cache,
                 spec,
                 &layout,
-                gdal_structural_metadata,
+                options.gdal_structural_metadata,
             )
             .map(|block| (spec, block))
         })
@@ -63,7 +66,7 @@ pub(crate) fn read_window(
                 cache,
                 spec,
                 &layout,
-                gdal_structural_metadata,
+                options.gdal_structural_metadata,
             )
             .map(|block| (spec, block))
         })
@@ -118,7 +121,7 @@ pub(crate) fn read_window_band(
     cache: &BlockCache,
     window: Window,
     band_index: usize,
-    gdal_structural_metadata: Option<&GdalStructuralMetadata>,
+    options: DecodeReadOptions<'_>,
 ) -> Result<Vec<u8>> {
     let layout = ifd.raster_layout()?;
     if band_index >= layout.samples_per_pixel {
@@ -132,7 +135,7 @@ pub(crate) fn read_window_band(
     }
 
     let output_len = window.band_output_len(&layout)?;
-    let mut output = vec![0u8; output_len];
+    let mut output = allocate_decode_output(output_len, options.decode_output_bytes)?;
     let window_row_end = window.row_end();
     let output_row_bytes = window.cols * layout.bytes_per_sample;
 
@@ -149,7 +152,7 @@ pub(crate) fn read_window_band(
                 cache,
                 spec,
                 &layout,
-                gdal_structural_metadata,
+                options.gdal_structural_metadata,
             )
             .map(|block| (spec, block))
         })
@@ -166,7 +169,7 @@ pub(crate) fn read_window_band(
                 cache,
                 spec,
                 &layout,
-                gdal_structural_metadata,
+                options.gdal_structural_metadata,
             )
             .map(|block| (spec, block))
         })

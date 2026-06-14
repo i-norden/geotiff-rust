@@ -17,6 +17,7 @@ fuzz_target!(|data: &[u8]| {
             block_cache_bytes: 0,
             block_cache_slots: 0,
             parse_budgets: Default::default(),
+            ..Default::default()
         },
     ) {
         Ok(file) => file,
