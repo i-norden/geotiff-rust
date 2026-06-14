@@ -59,6 +59,8 @@ pub use tiff_core::{
     ColorMap, ColorModel, ExtraSample, InkSet, PhotometricInterpretation, YCbCrPositioning,
 };
 
+const DEFAULT_DECODE_OUTPUT_BYTES: usize = 1024 * 1024 * 1024;
+
 /// Configuration for opening a TIFF file.
 #[derive(Debug, Clone, Copy)]
 pub struct OpenOptions {
@@ -68,6 +70,8 @@ pub struct OpenOptions {
     pub block_cache_slots: usize,
     /// Maximum IFDs, tag entries, and per-tag/aggregate tag-value bytes parsed from metadata.
     pub parse_budgets: ParseBudgets,
+    /// Maximum bytes allocated for a single decoded output buffer.
+    pub decode_output_bytes: usize,
 }
 
 impl Default for OpenOptions {
@@ -76,6 +80,7 @@ impl Default for OpenOptions {
             block_cache_bytes: 64 * 1024 * 1024,
             block_cache_slots: 257,
             parse_budgets: ParseBudgets::default(),
+            decode_output_bytes: DEFAULT_DECODE_OUTPUT_BYTES,
         }
     }
 }
@@ -86,6 +91,7 @@ pub struct TiffFile {
     header: header::TiffHeader,
     ifds: Vec<ifd::Ifd>,
     parse_budgets: ParseBudgets,
+    decode_output_bytes: usize,
     block_cache: Arc<BlockCache>,
     gdal_structural_metadata: Option<GdalStructuralMetadata>,
 }
@@ -102,6 +108,12 @@ pub(crate) struct Window {
     pub col_off: usize,
     pub rows: usize,
     pub cols: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DecodeReadOptions<'a> {
+    pub decode_output_bytes: usize,
+    pub gdal_structural_metadata: Option<&'a GdalStructuralMetadata>,
 }
 
 impl Window {
@@ -130,6 +142,40 @@ impl Window {
             .and_then(|pixels| pixels.checked_mul(layout.bytes_per_sample))
             .ok_or_else(|| Error::InvalidImageLayout("window band size overflows usize".into()))
     }
+}
+
+pub(crate) fn allocate_decode_output(output_len: usize, budget: usize) -> Result<Vec<u8>> {
+    let mut output = allocate_decode_output_capacity(output_len, budget)?;
+    output.resize(output_len, 0);
+    Ok(output)
+}
+
+pub(crate) fn allocate_decode_output_capacity(output_len: usize, budget: usize) -> Result<Vec<u8>> {
+    validate_decode_output_len(output_len, budget)?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(output_len)
+        .map_err(|error| Error::DecodeOutputAllocationFailed {
+            requested: output_len,
+            reason: error.to_string(),
+        })?;
+    Ok(output)
+}
+
+pub(crate) fn copy_decode_output(bytes: &[u8], budget: usize) -> Result<Vec<u8>> {
+    let mut output = allocate_decode_output_capacity(bytes.len(), budget)?;
+    output.extend_from_slice(bytes);
+    Ok(output)
+}
+
+pub(crate) fn validate_decode_output_len(output_len: usize, budget: usize) -> Result<()> {
+    if output_len > budget {
+        return Err(Error::DecodeOutputTooLarge {
+            requested: output_len,
+            limit: budget,
+        });
+    }
+    Ok(())
 }
 
 impl GdalStructuralMetadata {
@@ -398,6 +444,7 @@ impl TiffFile {
             header,
             ifds,
             parse_budgets: options.parse_budgets,
+            decode_output_bytes: options.decode_output_bytes,
             block_cache: Arc::new(BlockCache::new(
                 options.block_cache_bytes,
                 options.block_cache_slots,
@@ -442,6 +489,13 @@ impl TiffFile {
     /// Returns the backing source.
     pub fn source(&self) -> &dyn TiffSource {
         self.source.as_ref()
+    }
+
+    fn decode_read_options(&self) -> DecodeReadOptions<'_> {
+        DecodeReadOptions {
+            decode_output_bytes: self.decode_output_bytes,
+            gdal_structural_metadata: self.gdal_structural_metadata.as_ref(),
+        }
     }
 
     /// Parse an IFD at an arbitrary file offset.
@@ -657,7 +711,7 @@ impl TiffFile {
                 self.byte_order(),
                 &self.block_cache,
                 window,
-                self.gdal_structural_metadata.as_ref(),
+                self.decode_read_options(),
             )
         } else {
             strip::read_window(
@@ -666,7 +720,7 @@ impl TiffFile {
                 self.byte_order(),
                 &self.block_cache,
                 window,
-                self.gdal_structural_metadata.as_ref(),
+                self.decode_read_options(),
             )
         }
     }
@@ -691,7 +745,7 @@ impl TiffFile {
                 &self.block_cache,
                 window,
                 band_index,
-                self.gdal_structural_metadata.as_ref(),
+                self.decode_read_options(),
             )
         } else {
             strip::read_window_band(
@@ -701,7 +755,7 @@ impl TiffFile {
                 &self.block_cache,
                 window,
                 band_index,
-                self.gdal_structural_metadata.as_ref(),
+                self.decode_read_options(),
             )
         }
     }
@@ -715,6 +769,7 @@ impl TiffFile {
             window.cols,
             window.rows,
             &sample_bytes,
+            self.decode_output_bytes,
         )?;
         Ok(pixels)
     }
@@ -1633,6 +1688,66 @@ mod tests {
 
         drop(file);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn decode_output_budget_rejects_large_storage_window_before_allocation() {
+        let file = TiffFile::from_bytes_with_options(
+            build_stripped_tiff(4, 4, &[0], &[]),
+            OpenOptions {
+                decode_output_bytes: 8,
+                ..OpenOptions::default()
+            },
+        )
+        .unwrap();
+
+        let err = file.read_image_bytes(0).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::DecodeOutputTooLarge {
+                requested: 16,
+                limit: 8
+            }
+        ));
+    }
+
+    #[test]
+    fn decode_output_budget_rejects_large_color_decoded_output() {
+        let mut color_map = Vec::new();
+        color_map.extend((0u16..16).map(|value| value * 17 * 257));
+        color_map.extend((0u16..16).map(|value| (15 - value) * 17 * 257));
+        color_map.extend((0u16..16).map(|value| value * 8 * 257));
+        let file = TiffFile::from_bytes_with_options(
+            build_stripped_tiff(
+                1,
+                1,
+                &[0x00],
+                &[
+                    (258, 3, 1, inline_short(4)),
+                    (262, 3, 1, inline_short(3)),
+                    (
+                        320,
+                        3,
+                        color_map.len() as u32,
+                        color_map.iter().flat_map(|value| le_u16(*value)).collect(),
+                    ),
+                ],
+            ),
+            OpenOptions {
+                decode_output_bytes: 2,
+                ..OpenOptions::default()
+            },
+        )
+        .unwrap();
+
+        let err = file.read_decoded_image_bytes(0).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::DecodeOutputTooLarge {
+                requested: 3,
+                limit: 2
+            }
+        ));
     }
 
     #[test]

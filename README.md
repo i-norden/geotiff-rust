@@ -152,7 +152,9 @@ IFD chain length, tag counts, and metadata payload bytes. `GeoTiffFile`
 exposes the same settings as `GeoTiffOpenOptions`, and HTTP COG opens pass them
 through `HttpOpenOptions::tiff_options`. The reader also derives encoded
 strip/tile read limits and decompressed output limits from the raster layout
-before reading block payloads.
+before reading block payloads. `OpenOptions::decode_output_bytes` bounds each
+decoded output buffer allocation; raise it only when intentionally decoding
+larger windows or full rasters.
 
 Local `open` constructors use safe file-backed random access by default.
 Memory-mapped local opens are available through `unsafe` `open_mmap`
