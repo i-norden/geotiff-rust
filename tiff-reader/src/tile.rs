@@ -266,10 +266,14 @@ fn collect_tile_specs_for_window(
 
     let tiles_across = layout.width.div_ceil(tile_width);
     let tiles_down = layout.height.div_ceil(tile_height);
-    let tiles_per_plane = tiles_across * tiles_down;
+    let tiles_per_plane = tiles_across
+        .checked_mul(tiles_down)
+        .ok_or_else(tile_count_overflow)?;
     let expected = match layout.planar_configuration {
         1 => tiles_per_plane,
-        2 => tiles_per_plane * layout.samples_per_pixel,
+        2 => tiles_per_plane
+            .checked_mul(layout.samples_per_pixel)
+            .ok_or_else(tile_count_overflow)?,
         planar => return Err(Error::UnsupportedPlanarConfiguration(planar)),
     };
     if offsets.len() != expected {
@@ -298,11 +302,17 @@ fn collect_tile_specs_for_window(
     for plane in plane_range {
         for tile_row in first_tile_row..last_tile_row {
             for tile_col in first_tile_col..last_tile_col {
-                let plane_tile_index = tile_row * tiles_across + tile_col;
+                let plane_tile_index = tile_row
+                    .checked_mul(tiles_across)
+                    .and_then(|base| base.checked_add(tile_col))
+                    .ok_or_else(tile_count_overflow)?;
                 let tile_index = if layout.planar_configuration == 1 {
                     plane_tile_index
                 } else {
-                    plane * tiles_per_plane + plane_tile_index
+                    plane
+                        .checked_mul(tiles_per_plane)
+                        .and_then(|base| base.checked_add(plane_tile_index))
+                        .ok_or_else(tile_count_overflow)?
                 };
                 let x = tile_col * tile_width;
                 let y = tile_row * tile_height;
@@ -325,6 +335,10 @@ fn collect_tile_specs_for_window(
     }
 
     Ok(specs)
+}
+
+fn tile_count_overflow() -> Error {
+    Error::InvalidImageLayout("tile count overflows usize".into())
 }
 
 #[derive(Clone, Copy)]
