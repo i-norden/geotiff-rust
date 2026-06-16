@@ -178,11 +178,12 @@ cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-Reference-library parity tests are included for `tiff-reader` and
-`geotiff-reader`. They compare this workspace against GDAL/libtiff when those
-tools are available locally; otherwise they self-skip. Lossless codecs use
-exact byte and hash parity. The JPEG fixture uses a strict bounded-delta check
-because compliant decoders can differ by +/-1 in a small number of samples.
+Reference-library parity tests compare this workspace against GDAL/libtiff
+when those tools are available locally; otherwise they self-skip. Reader tests
+cover TIFF and GeoTIFF fixtures, and writer tests validate generated TIFF,
+GeoTIFF, and COG outputs through reference-library metadata and decoded-pixel
+checks. Lossless codecs use exact byte and hash parity. JPEG cases use strict
+bounded-delta checks because compliant decoders can differ slightly.
 
 For a reproducible reference environment, run the Docker harness:
 
