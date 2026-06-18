@@ -524,9 +524,16 @@ impl GeoTiffBuilder {
         width: u32,
         height: u32,
     ) -> Result<ImageBuilder> {
+        let samples_per_pixel = u16::try_from(self.bands).map_err(|_| {
+            Error::InvalidConfig(format!(
+                "band count {} exceeds TIFF SamplesPerPixel limit {}",
+                self.bands,
+                u16::MAX
+            ))
+        })?;
         let mut ib = ImageBuilder::new(width, height)
             .sample_type::<T>()
-            .samples_per_pixel(self.bands as u16)
+            .samples_per_pixel(samples_per_pixel)
             .compression(self.compression)
             .predictor(self.predictor)
             .planar_configuration(self.planar_configuration)

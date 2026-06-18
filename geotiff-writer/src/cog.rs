@@ -51,6 +51,15 @@ fn checked_add_u64(lhs: u64, rhs: u64, context: &str) -> Result<u64> {
         .ok_or_else(|| Error::Other(format!("{context} overflow")))
 }
 
+fn checked_samples_per_pixel(bands: usize) -> Result<u16> {
+    u16::try_from(bands).map_err(|_| {
+        Error::InvalidConfig(format!(
+            "band count {bands} exceeds TIFF SamplesPerPixel limit {}",
+            u16::MAX
+        ))
+    })
+}
+
 fn native_byte_order() -> ByteOrder {
     if cfg!(target_endian = "little") {
         ByteOrder::LittleEndian
@@ -1473,6 +1482,7 @@ fn spool_overview_from_source<T: NumericSample>(
             }
         }
     } else {
+        let samples_per_pixel = checked_samples_per_pixel(source.grid.bands)?;
         for tile_row in 0..tiles_down {
             for tile_col in 0..tiles_across {
                 let block_index = tile_row * tiles_across + tile_col;
@@ -1484,7 +1494,7 @@ fn spool_overview_from_source<T: NumericSample>(
                     CogBlockEncoding {
                         compression: plan.compression,
                         predictor: plan.predictor,
-                        samples_per_pixel: source.grid.bands as u16,
+                        samples_per_pixel,
                         row_width_pixels: plan.tile_width,
                         block_height: plan.tile_height as u32,
                         lerc_options: plan.lerc_options,
@@ -1556,6 +1566,7 @@ fn spool_base_blocks_from_store<T: NumericSample>(
             }
         }
     } else {
+        let samples_per_pixel = checked_samples_per_pixel(grid.bands)?;
         for tile_row in 0..grid.tiles_down {
             for tile_col in 0..grid.tiles_across {
                 let block_index = tile_row * grid.tiles_across + tile_col;
@@ -1571,7 +1582,7 @@ fn spool_base_blocks_from_store<T: NumericSample>(
                     CogBlockEncoding {
                         compression: plan.compression,
                         predictor: plan.predictor,
-                        samples_per_pixel: grid.bands as u16,
+                        samples_per_pixel,
                         row_width_pixels: plan.tile_width,
                         block_height: plan.tile_height as u32,
                         lerc_options: plan.lerc_options,
@@ -1595,6 +1606,7 @@ fn spool_tiled_data_3d<T: NumericSample>(
     let th = plan.tile_height;
     let tiles_across = width.div_ceil(tw);
     let tiles_down = height.div_ceil(th);
+    let samples_per_pixel = checked_samples_per_pixel(bands)?;
     let total_blocks = if matches!(
         plan.planar_configuration,
         tiff_core::PlanarConfiguration::Planar
@@ -1681,7 +1693,7 @@ fn spool_tiled_data_3d<T: NumericSample>(
                     CogBlockEncoding {
                         compression: plan.compression,
                         predictor: plan.predictor,
-                        samples_per_pixel: bands as u16,
+                        samples_per_pixel,
                         row_width_pixels: tw,
                         block_height: th as u32,
                         lerc_options: plan.lerc_options,
