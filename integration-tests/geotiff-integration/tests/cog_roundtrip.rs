@@ -77,6 +77,19 @@ fn assert_no_duplicate_tags(ifd: &tiff_reader::Ifd, tags: &[u16], context: &str)
     }
 }
 
+fn assert_invalid_samples_per_pixel_limit(err: GeoTiffWriteError, bands: usize) {
+    match err {
+        GeoTiffWriteError::InvalidConfig(message) => {
+            assert!(
+                message.contains(&format!("band count {bands}")),
+                "{message}"
+            );
+            assert!(message.contains("SamplesPerPixel"), "{message}");
+        }
+        other => panic!("expected InvalidConfig for {bands} bands, got {other:?}"),
+    }
+}
+
 fn assert_model_tiepoint_and_scale(
     ifd: &tiff_reader::Ifd,
     expected_tiepoint: [f64; 6],
@@ -455,6 +468,36 @@ fn cog_reuses_writer_validation_for_invalid_layouts() {
     assert!(
         matches!(err, GeoTiffWriteError::Tiff(tiff_writer::Error::InvalidConfig(message)) if message.contains("ColorMap"))
     );
+}
+
+#[test]
+fn cog_rejects_band_counts_exceeding_samples_per_pixel_limit() {
+    for bands in [u16::MAX as usize + 1, u16::MAX as usize + 2] {
+        let data = Array3::<u8>::zeros((1, 1, bands));
+
+        let mut oneshot_buf = Cursor::new(Vec::new());
+        let err = CogBuilder::new(
+            GeoTiffBuilder::new(1, 1)
+                .bands(bands as u32)
+                .tile_size(16, 16),
+        )
+        .write_3d_to(&mut oneshot_buf, data.view())
+        .unwrap_err();
+        assert_invalid_samples_per_pixel_limit(err, bands);
+
+        let mut streaming_buf = Cursor::new(Vec::new());
+        let err = CogBuilder::new(
+            GeoTiffBuilder::new(1, 1)
+                .bands(bands as u32)
+                .tile_size(16, 16),
+        )
+        .tile_writer::<u8, _>(&mut streaming_buf);
+        let err = match err {
+            Ok(_) => panic!("expected oversized band COG tile writer to fail validation"),
+            Err(err) => err,
+        };
+        assert_invalid_samples_per_pixel_limit(err, bands);
+    }
 }
 
 #[test]

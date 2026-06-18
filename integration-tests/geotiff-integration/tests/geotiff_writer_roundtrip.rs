@@ -44,6 +44,19 @@ fn assert_u8_bytes_close(
     );
 }
 
+fn assert_invalid_samples_per_pixel_limit(err: GeoTiffWriteError, bands: usize) {
+    match err {
+        GeoTiffWriteError::InvalidConfig(message) => {
+            assert!(
+                message.contains(&format!("band count {bands}")),
+                "{message}"
+            );
+            assert!(message.contains("SamplesPerPixel"), "{message}");
+        }
+        other => panic!("expected InvalidConfig for {bands} bands, got {other:?}"),
+    }
+}
+
 fn sample_color_map() -> ColorMap {
     let red = (0u16..=255).map(|value| value * 257).collect();
     let green = (0u16..=255).map(|value| 65_535 - value * 257).collect();
@@ -557,6 +570,20 @@ fn geotiff_writer_rejects_unsupported_ycbcr_subsampling() {
     assert!(
         matches!(err, GeoTiffWriteError::Tiff(tiff_writer::Error::InvalidConfig(message)) if message.contains("YCbCr subsampling"))
     );
+}
+
+#[test]
+fn geotiff_writer_rejects_band_counts_exceeding_samples_per_pixel_limit() {
+    for bands in [u16::MAX as usize + 1, u16::MAX as usize + 2] {
+        let data = Array3::<u8>::zeros((1, 1, bands));
+        let mut buf = Cursor::new(Vec::new());
+        let err = GeoTiffBuilder::new(1, 1)
+            .bands(bands as u32)
+            .write_3d_to(&mut buf, data.view())
+            .unwrap_err();
+
+        assert_invalid_samples_per_pixel_limit(err, bands);
+    }
 }
 
 #[test]
