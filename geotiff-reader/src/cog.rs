@@ -650,6 +650,9 @@ mod tests {
         std::fs::read(path).ok()
     }
 
+    type RequestedRange = (usize, usize);
+    type ParsedRequest = (String, Option<RequestedRange>, String);
+
     struct TestServer {
         addr: SocketAddr,
         stop: Arc<AtomicBool>,
@@ -731,9 +734,7 @@ mod tests {
         }
     }
 
-    fn read_request(
-        stream: &mut std::net::TcpStream,
-    ) -> Option<(String, Option<(usize, usize)>, String)> {
+    fn read_request(stream: &mut std::net::TcpStream) -> Option<ParsedRequest> {
         let mut request = Vec::with_capacity(1024);
         let mut chunk = [0u8; 1024];
 
