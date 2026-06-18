@@ -10,7 +10,7 @@ use geotiff_writer::{
     CogBuilder, Compression, Error as GeoTiffWriteError, GeoTiffBuilder, JpegOptions,
     OverviewStorage, PhotometricInterpretation, PlanarConfiguration, Resampling, TiffVariant,
 };
-use ndarray::{Array2, Array3};
+use ndarray::{Array2, Array3, ShapeBuilder};
 use tiff_reader::TiffFile;
 
 fn gdal_structural_metadata_bytes(planar_configuration: PlanarConfiguration) -> Vec<u8> {
@@ -420,6 +420,34 @@ fn cog_validates_and_dedupes_overview_levels() {
         .unwrap();
     let tiff = TiffFile::from_bytes(deduped_buf.into_inner()).unwrap();
     assert_eq!(tiff.ifd_count(), 3);
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn cog_oneshot_rejects_shapes_that_exceed_u32_without_truncating() {
+    let sample = 7u8;
+    let huge_width = u32::MAX as usize + 2;
+    // Safety: zero strides make every logical element resolve to `sample`,
+    // which remains alive until the view is no longer used.
+    let huge = unsafe {
+        ndarray::ArrayView2::from_shape_ptr(
+            (1, huge_width).strides((0, 0)),
+            std::ptr::addr_of!(sample),
+        )
+    };
+
+    let mut buf = Cursor::new(Vec::new());
+    let err = CogBuilder::new(GeoTiffBuilder::new(1, 1).tile_size(16, 16))
+        .no_overviews()
+        .write_2d_to(&mut buf, huge)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        GeoTiffWriteError::DataSizeMismatch {
+            expected: 1,
+            actual
+        } if actual == huge_width
+    ));
 }
 
 #[test]
