@@ -26,7 +26,8 @@ parking_lot = "0.12"
 default = ["local", "rayon"]
 local = ["dep:tiff-reader"]
 rayon = ["dep:rayon", "local", "tiff-reader/rayon"]
-cog = ["dep:reqwest", "local"]
+cog = ["dep:reqwest", "local", "rustls-tls"]
+rustls-tls = ["dep:reqwest", "reqwest/rustls-tls"]
 
 [dependencies.reqwest]
 version = "0.12"

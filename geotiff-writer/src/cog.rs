@@ -16,7 +16,7 @@ use std::fs::File;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use ndarray::{Array3, ArrayView2, ArrayView3, Axis};
+use ndarray::{ArrayView2, ArrayView3, Axis};
 use tempfile::tempfile;
 use tiff_core::{ByteOrder, Compression, Predictor, Tag, TagType, TagValue, TAG_SUB_IFDS};
 use tiff_writer::{encoder, ImageBuilder, TiffVariant};
@@ -305,6 +305,12 @@ struct OverviewLevelSpec<T: NumericSample> {
     nodata: Option<T>,
 }
 
+trait OverviewSampleSource<T: NumericSample> {
+    fn fill_value(&self) -> T;
+    fn grid(&self) -> RawTileGrid;
+    fn sample_at(&mut self, row: usize, col: usize, band: usize) -> Result<T>;
+}
+
 impl<'a, T: NumericSample> RawTileSource<'a, T> {
     fn new(
         store: &'a mut RawTileStore<T>,
@@ -363,6 +369,53 @@ impl<'a, T: NumericSample> RawTileSource<'a, T> {
             (local_row * tile_width + local_col) * bands + band
         };
         Ok(block[sample_index])
+    }
+}
+
+impl<T: NumericSample> OverviewSampleSource<T> for RawTileSource<'_, T> {
+    fn fill_value(&self) -> T {
+        self.fill_value
+    }
+
+    fn grid(&self) -> RawTileGrid {
+        self.grid
+    }
+
+    fn sample_at(&mut self, row: usize, col: usize, band: usize) -> Result<T> {
+        RawTileSource::sample_at(self, row, col, band)
+    }
+}
+
+struct ArrayTileSource<'a, T: NumericSample> {
+    data: ArrayView3<'a, T>,
+    fill_value: T,
+    grid: RawTileGrid,
+}
+
+impl<'a, T: NumericSample> ArrayTileSource<'a, T> {
+    fn new(data: ArrayView3<'a, T>, fill_value: T, grid: RawTileGrid) -> Self {
+        Self {
+            data,
+            fill_value,
+            grid,
+        }
+    }
+}
+
+impl<T: NumericSample> OverviewSampleSource<T> for ArrayTileSource<'_, T> {
+    fn fill_value(&self) -> T {
+        self.fill_value
+    }
+
+    fn grid(&self) -> RawTileGrid {
+        self.grid
+    }
+
+    fn sample_at(&mut self, row: usize, col: usize, band: usize) -> Result<T> {
+        if row >= self.grid.height || col >= self.grid.width {
+            return Ok(self.fill_value);
+        }
+        Ok(self.data[[row, col, band]])
     }
 }
 
@@ -924,41 +977,47 @@ impl CogBuilder {
         let overview_levels = self.normalized_overview_levels()?;
         self.validate_images::<T>(&overview_levels, tw as u32, th as u32)?;
         let nodata = parse_nodata_value::<T>(&self.inner.nodata);
+        let fill_value = nodata.unwrap_or_else(T::zero);
         let prefix = gdal_structural_metadata_bytes(self.inner.planar_configuration);
         let mut spool = BlockSpool::new()?;
         let mut images = self.build_images::<T>(&overview_levels, tw as u32, th as u32)?;
+        let plan = TileWritePlan {
+            tile_width: tw,
+            tile_height: th,
+            planar_configuration: self.inner.planar_configuration,
+            compression: self.inner.compression,
+            predictor: self.inner.predictor,
+            lerc_options: self.inner.lerc_options,
+            jpeg_options: self.inner.jpeg_options,
+        };
+        let grid = RawTileGrid {
+            tile_width: tw,
+            tile_height: th,
+            tiles_across: width.div_ceil(tw),
+            tiles_down: height.div_ceil(th),
+            width,
+            height,
+            bands,
+            planar_configuration: self.inner.planar_configuration,
+        };
 
-        for idx in (0..overview_levels.len()).rev() {
-            let overview =
-                generate_overview_3d(data, overview_levels[idx] as usize, self.resampling, nodata);
-            images[1 + idx].blocks = spool_tiled_data_3d(
-                &mut spool,
-                overview.view(),
-                TileWritePlan {
-                    tile_width: tw,
-                    tile_height: th,
-                    planar_configuration: self.inner.planar_configuration,
-                    compression: self.inner.compression,
-                    predictor: self.inner.predictor,
-                    lerc_options: self.inner.lerc_options,
-                    jpeg_options: self.inner.jpeg_options,
-                },
-            )?;
+        {
+            let mut source = ArrayTileSource::new(data.view(), fill_value, grid);
+            for idx in (0..overview_levels.len()).rev() {
+                let level = overview_levels[idx] as usize;
+                let spec = OverviewLevelSpec {
+                    overview_width: width.div_ceil(level),
+                    overview_height: height.div_ceil(level),
+                    level,
+                    resampling: self.resampling,
+                    nodata,
+                };
+                images[1 + idx].blocks =
+                    spool_overview_from_source(&mut spool, &mut source, spec, plan)?;
+            }
         }
 
-        images[0].blocks = spool_tiled_data_3d(
-            &mut spool,
-            data,
-            TileWritePlan {
-                tile_width: tw,
-                tile_height: th,
-                planar_configuration: self.inner.planar_configuration,
-                compression: self.inner.compression,
-                predictor: self.inner.predictor,
-                lerc_options: self.inner.lerc_options,
-                jpeg_options: self.inner.jpeg_options,
-            },
-        )?;
+        images[0].blocks = spool_tiled_data_3d(&mut spool, data, plan)?;
 
         let base_offset = sink.stream_position()?;
         let layout = plan_cog_layout(
@@ -1276,57 +1335,19 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
     }
 }
 
-fn generate_overview_3d<T: NumericSample>(
-    data: ArrayView3<T>,
-    level: usize,
-    resampling: Resampling,
-    nodata: Option<T>,
-) -> Array3<T> {
-    let (height, width, bands) = data.dim();
-    let ovr_w = width.div_ceil(level);
-    let ovr_h = height.div_ceil(level);
-
-    Array3::from_shape_fn((ovr_h, ovr_w, bands), |(r, c, band)| match resampling {
-        Resampling::NearestNeighbor => {
-            let src_r = (r * level).min(height - 1);
-            let src_c = (c * level).min(width - 1);
-            data[[src_r, src_c, band]]
-        }
-        Resampling::Average => {
-            let start_r = r * level;
-            let start_c = c * level;
-            let end_r = (start_r + level).min(height);
-            let end_c = (start_c + level).min(width);
-            let mut sum = 0.0;
-            let mut count = 0usize;
-            for sr in start_r..end_r {
-                for sc in start_c..end_c {
-                    let value = data[[sr, sc, band]];
-                    if nodata.is_some_and(|nodata_value| value == nodata_value) {
-                        continue;
-                    }
-                    sum += value.to_f64();
-                    count += 1;
-                }
-            }
-            if count == 0 {
-                nodata.unwrap_or_else(T::zero)
-            } else {
-                T::from_f64(sum / count as f64)
-            }
-        }
-    })
-}
-
-fn resample_overview_value<T: NumericSample>(
-    source: &mut RawTileSource<'_, T>,
+fn resample_overview_value<T, S>(
+    source: &mut S,
     level: usize,
     overview_row: usize,
     overview_col: usize,
     band: usize,
     resampling: Resampling,
     nodata: Option<T>,
-) -> Result<T> {
+) -> Result<T>
+where
+    T: NumericSample,
+    S: OverviewSampleSource<T>,
+{
     match resampling {
         Resampling::NearestNeighbor => {
             let src_row = overview_row * level;
@@ -1334,10 +1355,11 @@ fn resample_overview_value<T: NumericSample>(
             source.sample_at(src_row, src_col, band)
         }
         Resampling::Average => {
+            let grid = source.grid();
             let start_row = overview_row * level;
             let start_col = overview_col * level;
-            let end_row = (start_row + level).min(source.grid.height);
-            let end_col = (start_col + level).min(source.grid.width);
+            let end_row = (start_row + level).min(grid.height);
+            let end_col = (start_col + level).min(grid.width);
             let mut sum = 0.0;
             let mut count = 0usize;
             for src_row in start_row..end_row {
@@ -1359,15 +1381,19 @@ fn resample_overview_value<T: NumericSample>(
     }
 }
 
-fn build_resampled_planar_block<T: NumericSample>(
-    source: &mut RawTileSource<'_, T>,
+fn build_resampled_planar_block<T, S>(
+    source: &mut S,
     spec: OverviewLevelSpec<T>,
     tile_row: usize,
     tile_col: usize,
     band: usize,
     plan: TileWritePlan,
-) -> Result<Vec<T>> {
-    let mut block = vec![source.fill_value; plan.tile_width * plan.tile_height];
+) -> Result<Vec<T>>
+where
+    T: NumericSample,
+    S: OverviewSampleSource<T>,
+{
+    let mut block = vec![source.fill_value(); plan.tile_width * plan.tile_height];
     for row in 0..plan.tile_height {
         let overview_row = tile_row * plan.tile_height + row;
         if overview_row >= spec.overview_height {
@@ -1392,14 +1418,19 @@ fn build_resampled_planar_block<T: NumericSample>(
     Ok(block)
 }
 
-fn build_resampled_chunky_block<T: NumericSample>(
-    source: &mut RawTileSource<'_, T>,
+fn build_resampled_chunky_block<T, S>(
+    source: &mut S,
     spec: OverviewLevelSpec<T>,
     tile_row: usize,
     tile_col: usize,
     plan: TileWritePlan,
-) -> Result<Vec<T>> {
-    let mut block = vec![source.fill_value; plan.tile_width * plan.tile_height * source.grid.bands];
+) -> Result<Vec<T>>
+where
+    T: NumericSample,
+    S: OverviewSampleSource<T>,
+{
+    let grid = source.grid();
+    let mut block = vec![source.fill_value(); plan.tile_width * plan.tile_height * grid.bands];
     for row in 0..plan.tile_height {
         let overview_row = tile_row * plan.tile_height + row;
         if overview_row >= spec.overview_height {
@@ -1410,36 +1441,40 @@ fn build_resampled_chunky_block<T: NumericSample>(
             if overview_col >= spec.overview_width {
                 break;
             }
-            for band in 0..source.grid.bands {
-                block[(row * plan.tile_width + col) * source.grid.bands + band] =
-                    resample_overview_value(
-                        source,
-                        spec.level,
-                        overview_row,
-                        overview_col,
-                        band,
-                        spec.resampling,
-                        spec.nodata,
-                    )?;
+            for band in 0..grid.bands {
+                block[(row * plan.tile_width + col) * grid.bands + band] = resample_overview_value(
+                    source,
+                    spec.level,
+                    overview_row,
+                    overview_col,
+                    band,
+                    spec.resampling,
+                    spec.nodata,
+                )?;
             }
         }
     }
     Ok(block)
 }
 
-fn spool_overview_from_source<T: NumericSample>(
+fn spool_overview_from_source<T, S>(
     spool: &mut BlockSpool,
-    source: &mut RawTileSource<'_, T>,
+    source: &mut S,
     spec: OverviewLevelSpec<T>,
     plan: TileWritePlan,
-) -> Result<Vec<CogBlockRecord>> {
+) -> Result<Vec<CogBlockRecord>>
+where
+    T: NumericSample,
+    S: OverviewSampleSource<T>,
+{
+    let grid = source.grid();
     let tiles_across = spec.overview_width.div_ceil(plan.tile_width);
     let tiles_down = spec.overview_height.div_ceil(plan.tile_height);
     let total_blocks = if matches!(
         plan.planar_configuration,
         tiff_core::PlanarConfiguration::Planar
     ) {
-        tiles_across * tiles_down * source.grid.bands
+        tiles_across * tiles_down * grid.bands
     } else {
         tiles_across * tiles_down
     };
@@ -1457,7 +1492,7 @@ fn spool_overview_from_source<T: NumericSample>(
         tiff_core::PlanarConfiguration::Planar
     ) {
         let tiles_per_plane = tiles_across * tiles_down;
-        for band in 0..source.grid.bands {
+        for band in 0..grid.bands {
             for tile_row in 0..tiles_down {
                 for tile_col in 0..tiles_across {
                     let tile_index = tile_row * tiles_across + tile_col;
@@ -1482,7 +1517,7 @@ fn spool_overview_from_source<T: NumericSample>(
             }
         }
     } else {
-        let samples_per_pixel = checked_samples_per_pixel(source.grid.bands)?;
+        let samples_per_pixel = checked_samples_per_pixel(grid.bands)?;
         for tile_row in 0..tiles_down {
             for tile_col in 0..tiles_across {
                 let block_index = tile_row * tiles_across + tile_col;

@@ -156,6 +156,11 @@ before reading block payloads. `OpenOptions::decode_output_bytes` bounds each
 decoded output buffer allocation; raise it only when intentionally decoding
 larger windows or full rasters.
 
+Remote COG opens use bounded connect, read, and per-request timeouts by default.
+`HttpOpenOptions` also accepts per-request headers and an optional custom
+`reqwest::blocking::Client` for authenticated object stores, proxies, or custom
+TLS policy.
+
 Local `open` constructors use safe file-backed random access by default.
 Memory-mapped local opens are available through `unsafe` `open_mmap`
 constructors when the caller can guarantee that the mapped file will not be
@@ -169,7 +174,8 @@ mutated or truncated while it is open.
 | `rayon` | yes | Parallel strip/tile decompression (tiff-reader, geotiff-reader) |
 | `jpeg` | yes | JPEG-in-TIFF read/write support (tiff-reader, tiff-writer) |
 | `zstd` | yes | Pure-Rust ZSTD compression via `ruzstd`, including TIFF `LERC+ZSTD` read/write support (tiff-reader, tiff-writer) |
-| `cog` | no | HTTP range-backed remote COG open (geotiff-reader) |
+| `cog` | no | HTTP range-backed remote COG open with rustls TLS by default (geotiff-reader) |
+| `rustls-tls` | no | Rustls-backed HTTPS transport for `geotiff-reader` remote COG opens |
 
 ## Testing
 
