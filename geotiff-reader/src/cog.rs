@@ -4,13 +4,15 @@
 //! local files by providing a random-access byte source backed by cached range
 //! requests.
 
+use std::io::Read;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use lru::LruCache;
 use parking_lot::Mutex;
-use reqwest::blocking::Client;
-use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, RANGE};
+use reqwest::blocking::{Client, RequestBuilder};
+use reqwest::header::{HeaderMap, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
 use reqwest::StatusCode;
 use tiff_reader::source::{SharedSource, TiffSource};
 use tiff_reader::{OpenOptions as TiffOpenOptions, TiffFile};
@@ -18,7 +20,7 @@ use tiff_reader::{OpenOptions as TiffOpenOptions, TiffFile};
 use crate::{Error, GeoTiffFile, Result};
 
 /// Options for HTTP range-backed GeoTIFF access.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct HttpOpenOptions {
     /// Fixed byte-range chunk size.
     pub chunk_size: usize,
@@ -26,6 +28,18 @@ pub struct HttpOpenOptions {
     pub cache_bytes: usize,
     /// Maximum cached chunks.
     pub cache_slots: usize,
+    /// TCP connect timeout for clients built from these options.
+    ///
+    /// Ignored when `client` is provided; configure custom clients directly.
+    pub connect_timeout: Option<Duration>,
+    /// Timeout for each range response body read.
+    pub read_timeout: Option<Duration>,
+    /// Overall timeout applied to each HEAD or GET request.
+    pub request_timeout: Option<Duration>,
+    /// Headers sent on every HEAD and byte-range GET request.
+    pub headers: HeaderMap,
+    /// Optional preconfigured blocking client for custom TLS, proxy, redirect, or auth behavior.
+    pub client: Option<Client>,
     /// TIFF decoder options applied after range reads are assembled.
     pub tiff_options: TiffOpenOptions,
 }
@@ -36,6 +50,11 @@ impl Default for HttpOpenOptions {
             chunk_size: 256 * 1024,
             cache_bytes: 64 * 1024 * 1024,
             cache_slots: 257,
+            connect_timeout: Some(Duration::from_secs(10)),
+            read_timeout: Some(Duration::from_secs(30)),
+            request_timeout: Some(Duration::from_secs(120)),
+            headers: HeaderMap::new(),
+            client: None,
             tiff_options: TiffOpenOptions::default(),
         }
     }
@@ -56,8 +75,9 @@ impl HttpGeoTiffFile {
     /// Open a remote GeoTIFF/COG using explicit range-cache options.
     pub fn open_with_options(url: impl Into<String>, options: HttpOpenOptions) -> Result<Self> {
         let url = url.into();
+        let tiff_options = options.tiff_options;
         let source: SharedSource = Arc::new(HttpRangeSource::open(url.clone(), options)?);
-        let tiff = TiffFile::from_source_with_options(source, options.tiff_options)?;
+        let tiff = TiffFile::from_source_with_options(source, tiff_options)?;
         let inner = GeoTiffFile::from_tiff(tiff)?;
         Ok(Self { url, inner })
     }
@@ -78,6 +98,9 @@ struct HttpRangeSource {
     url: String,
     len: u64,
     chunk_size: usize,
+    headers: HeaderMap,
+    read_timeout: Option<Duration>,
+    request_timeout: Option<Duration>,
     cache: Mutex<RangeCacheState>,
     max_bytes: usize,
     cache_enabled: bool,
@@ -90,14 +113,17 @@ struct RangeCacheState {
 
 impl HttpRangeSource {
     fn open(url: String, options: HttpOpenOptions) -> Result<Self> {
-        let client = Client::builder().build()?;
-        let len = probe_content_length(&client, &url)?;
+        let client = build_client(&options)?;
+        let len = probe_content_length(&client, &url, &options.headers, options.request_timeout)?;
         let slots = NonZeroUsize::new(options.cache_slots.max(1)).unwrap();
         Ok(Self {
             client,
             url,
             len,
             chunk_size: options.chunk_size.max(1),
+            headers: options.headers,
+            read_timeout: options.read_timeout,
+            request_timeout: options.request_timeout,
             cache: Mutex::new(RangeCacheState {
                 cache: LruCache::new(slots),
                 current_bytes: 0,
@@ -125,12 +151,14 @@ impl HttpRangeSource {
             )));
         }
         let end = start.saturating_add(chunk_size).min(self.len) - 1;
-        let response = self
-            .client
-            .get(&self.url)
-            .header(RANGE, format!("bytes={start}-{end}"))
-            .send()?
-            .error_for_status()?;
+        let response = request_with_options(
+            self.client.get(&self.url),
+            &self.headers,
+            shorter_timeout(self.read_timeout, self.request_timeout),
+        )
+        .header(RANGE, format!("bytes={start}-{end}"))
+        .send()?
+        .error_for_status()?;
         if response.status() != StatusCode::PARTIAL_CONTENT {
             return Err(Error::Other(format!(
                 "server did not honor byte-range request for {}: expected 206, got {}",
@@ -138,8 +166,13 @@ impl HttpRangeSource {
                 response.status()
             )));
         }
-        let body = response.bytes()?.to_vec();
         let expected_len = usize::try_from(end - start + 1).unwrap_or(usize::MAX);
+        let body = read_response_body(
+            response,
+            expected_len,
+            self.request_timeout,
+            &format!("{} bytes={start}-{end}", self.url),
+        )?;
         if body.len() != expected_len {
             return Err(Error::Other(format!(
                 "range response length mismatch for {}: expected {expected_len} bytes, got {}",
@@ -170,6 +203,78 @@ impl HttpRangeSource {
         }
         Ok(value)
     }
+}
+
+fn build_client(options: &HttpOpenOptions) -> Result<Client> {
+    if let Some(client) = &options.client {
+        return Ok(client.clone());
+    }
+
+    let mut builder = Client::builder();
+    if let Some(timeout) = options.connect_timeout {
+        builder = builder.connect_timeout(timeout);
+    }
+    if let Some(timeout) = options.request_timeout {
+        builder = builder.timeout(timeout);
+    }
+    Ok(builder.build()?)
+}
+
+fn request_with_options(
+    request: RequestBuilder,
+    headers: &HeaderMap,
+    request_timeout: Option<Duration>,
+) -> RequestBuilder {
+    let mut request = if headers.is_empty() {
+        request
+    } else {
+        request.headers(headers.clone())
+    };
+    if let Some(timeout) = request_timeout {
+        request = request.timeout(timeout);
+    }
+    request
+}
+
+fn shorter_timeout(lhs: Option<Duration>, rhs: Option<Duration>) -> Option<Duration> {
+    match (lhs, rhs) {
+        (Some(lhs), Some(rhs)) => Some(lhs.min(rhs)),
+        (Some(timeout), None) | (None, Some(timeout)) => Some(timeout),
+        (None, None) => None,
+    }
+}
+
+fn read_response_body(
+    mut response: reqwest::blocking::Response,
+    expected_len: usize,
+    request_timeout: Option<Duration>,
+    context: &str,
+) -> Result<Vec<u8>> {
+    let started = Instant::now();
+    let mut body = Vec::with_capacity(expected_len);
+    let mut buffer = [0u8; 8192];
+
+    while body.len() < expected_len {
+        if let Some(timeout) = request_timeout {
+            if started.elapsed() >= timeout {
+                return Err(Error::Other(format!(
+                    "HTTP response body read exceeded overall timeout for {context}"
+                )));
+            }
+        }
+
+        let remaining = expected_len - body.len();
+        let read_len = buffer.len().min(remaining);
+        let read = response
+            .read(&mut buffer[..read_len])
+            .map_err(|err| Error::Io(err, context.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        body.extend_from_slice(&buffer[..read]);
+    }
+
+    Ok(body)
 }
 
 impl TiffSource for HttpRangeSource {
@@ -223,8 +328,13 @@ impl TiffSource for HttpRangeSource {
     }
 }
 
-fn probe_content_length(client: &Client, url: &str) -> Result<u64> {
-    let head = client.head(url).send()?;
+fn probe_content_length(
+    client: &Client,
+    url: &str,
+    headers: &HeaderMap,
+    request_timeout: Option<Duration>,
+) -> Result<u64> {
+    let head = request_with_options(client.head(url), headers, request_timeout).send()?;
     if head.status().is_success() {
         if let Some(value) = head.headers().get(CONTENT_LENGTH) {
             if let Ok(text) = value.to_str() {
@@ -235,8 +345,7 @@ fn probe_content_length(client: &Client, url: &str) -> Result<u64> {
         }
     }
 
-    let response = client
-        .get(url)
+    let response = request_with_options(client.get(url), headers, request_timeout)
         .header(RANGE, "bytes=0-0")
         .send()?
         .error_for_status()?;
@@ -268,10 +377,12 @@ mod tests {
     use std::net::{SocketAddr, TcpListener};
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
 
+    use reqwest::blocking::Client;
+    use reqwest::header::{HeaderMap, HeaderValue};
     use tiff_reader::source::TiffSource;
 
     use super::{parse_total_length, HttpGeoTiffFile, HttpOpenOptions, HttpRangeSource};
@@ -279,6 +390,17 @@ mod tests {
     #[test]
     fn parses_total_length_from_content_range() {
         assert_eq!(parse_total_length("bytes 0-0/12345"), Some(12345));
+    }
+
+    #[test]
+    fn default_http_options_set_request_timeouts() {
+        let options = HttpOpenOptions::default();
+
+        assert_eq!(options.connect_timeout, Some(Duration::from_secs(10)));
+        assert_eq!(options.read_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(options.request_timeout, Some(Duration::from_secs(120)));
+        assert!(options.headers.is_empty());
+        assert!(options.client.is_none());
     }
 
     #[test]
@@ -327,6 +449,51 @@ mod tests {
         let expected = &bytes[570..570 + 1223];
         let actual = source.read_exact_at(570, 1223).unwrap();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn sends_custom_headers_with_custom_client_for_probe_and_range_requests() {
+        let Some(server) = TestServer::start(vec![0; 12]) else {
+            return;
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("x-test-auth", HeaderValue::from_static("secret"));
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let source = HttpRangeSource::open(
+            server.url(),
+            HttpOpenOptions {
+                chunk_size: 4,
+                cache_bytes: 0,
+                cache_slots: 0,
+                headers,
+                client: Some(client),
+                ..HttpOpenOptions::default()
+            },
+        )
+        .unwrap();
+
+        source.read_exact_at(0, 1).unwrap();
+
+        let requests = server.requests();
+        assert!(
+            requests.iter().any(|request| {
+                request.starts_with("HEAD ")
+                    && request.to_ascii_lowercase().contains("x-test-auth: secret")
+            }),
+            "HEAD request did not include custom header: {requests:?}"
+        );
+        assert!(
+            requests.iter().any(|request| {
+                let lower = request.to_ascii_lowercase();
+                request.starts_with("GET ")
+                    && lower.contains("range: bytes=0-3")
+                    && lower.contains("x-test-auth: secret")
+            }),
+            "range GET request did not include custom header: {requests:?}"
+        );
     }
 
     #[test]
@@ -486,6 +653,7 @@ mod tests {
     struct TestServer {
         addr: SocketAddr,
         stop: Arc<AtomicBool>,
+        requests: Arc<Mutex<Vec<String>>>,
         handle: Option<thread::JoinHandle<()>>,
     }
 
@@ -496,14 +664,18 @@ mod tests {
             let addr = listener.local_addr().ok()?;
             let stop = Arc::new(AtomicBool::new(false));
             let stop_flag = stop.clone();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let requests_worker = requests.clone();
 
             let handle = thread::spawn(move || {
                 while !stop_flag.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
-                            let Some((request_line, range)) = read_request(&mut stream) else {
+                            let Some((request_line, range, request)) = read_request(&mut stream)
+                            else {
                                 continue;
                             };
+                            requests_worker.lock().unwrap().push(request);
 
                             if request_line.starts_with("HEAD ") {
                                 let response = format!(
@@ -545,6 +717,7 @@ mod tests {
             Some(Self {
                 addr,
                 stop,
+                requests,
                 handle: Some(handle),
             })
         }
@@ -552,9 +725,15 @@ mod tests {
         fn url(&self) -> String {
             format!("http://{}", self.addr)
         }
+
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().unwrap().clone()
+        }
     }
 
-    fn read_request(stream: &mut std::net::TcpStream) -> Option<(String, Option<(usize, usize)>)> {
+    fn read_request(
+        stream: &mut std::net::TcpStream,
+    ) -> Option<(String, Option<(usize, usize)>, String)> {
         let mut request = Vec::with_capacity(1024);
         let mut chunk = [0u8; 1024];
 
@@ -572,7 +751,7 @@ mod tests {
             }
         }
 
-        let request = String::from_utf8_lossy(&request);
+        let request = String::from_utf8_lossy(&request).into_owned();
         let mut lines = request.lines();
         let request_line = lines.next()?.to_string();
         let mut range = None;
@@ -590,7 +769,7 @@ mod tests {
             }
         }
 
-        Some((request_line, range))
+        Some((request_line, range, request))
     }
 
     impl Drop for TestServer {
