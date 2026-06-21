@@ -19,6 +19,25 @@ use crate::error::{Error, Result};
 use crate::sample::{NumericSample, WriteSample};
 use crate::tile_writer::StreamingTileWriter;
 
+pub(crate) fn checked_sample_count(dimensions: &[usize], context: &str) -> Result<usize> {
+    dimensions
+        .iter()
+        .try_fold(1usize, |sample_count, &dimension| {
+            sample_count
+                .checked_mul(dimension)
+                .ok_or_else(|| Error::Other(format!("{context} sample count overflows usize")))
+        })
+}
+
+fn checked_builder_dimension(dimension: u32, name: &str) -> Result<usize> {
+    usize::try_from(dimension)
+        .map_err(|_| Error::Other(format!("{name} dimension exceeds usize::MAX")))
+}
+
+fn dimension_matches(actual: usize, expected: u32) -> bool {
+    matches!(u32::try_from(actual), Ok(actual) if actual == expected)
+}
+
 /// Builder for constructing GeoTIFF files with metadata.
 #[derive(Debug, Clone)]
 pub struct GeoTiffBuilder {
@@ -573,6 +592,49 @@ impl GeoTiffBuilder {
         Ok(ib)
     }
 
+    fn expected_2d_sample_count(&self) -> Result<usize> {
+        let height = checked_builder_dimension(self.height, "height")?;
+        let width = checked_builder_dimension(self.width, "width")?;
+        checked_sample_count(&[height, width], "expected raster")
+    }
+
+    fn expected_3d_sample_count(&self) -> Result<usize> {
+        let height = checked_builder_dimension(self.height, "height")?;
+        let width = checked_builder_dimension(self.width, "width")?;
+        let bands = checked_builder_dimension(self.bands, "band")?;
+        checked_sample_count(&[height, width, bands], "expected raster")
+    }
+
+    pub(crate) fn validate_2d_data_shape(&self, height: usize, width: usize) -> Result<()> {
+        if !dimension_matches(width, self.width) || !dimension_matches(height, self.height) {
+            return Err(Error::DataSizeMismatch {
+                expected: self.expected_2d_sample_count()?,
+                actual: checked_sample_count(&[height, width], "actual raster")?,
+            });
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn validate_3d_data_shape(
+        &self,
+        height: usize,
+        width: usize,
+        bands: usize,
+    ) -> Result<()> {
+        if !dimension_matches(width, self.width)
+            || !dimension_matches(height, self.height)
+            || !dimension_matches(bands, self.bands)
+        {
+            return Err(Error::DataSizeMismatch {
+                expected: self.expected_3d_sample_count()?,
+                actual: checked_sample_count(&[height, width, bands], "actual raster")?,
+            });
+        }
+
+        Ok(())
+    }
+
     // ---- Write methods ----
 
     /// Write a single-band 2D array to a file path.
@@ -593,12 +655,7 @@ impl GeoTiffBuilder {
         data: ArrayView2<T>,
     ) -> Result<()> {
         let (height, width) = data.dim();
-        if width as u32 != self.width || height as u32 != self.height {
-            return Err(Error::DataSizeMismatch {
-                expected: (self.height as usize) * (self.width as usize),
-                actual: height * width,
-            });
-        }
+        self.validate_2d_data_shape(height, width)?;
 
         let ib = self.to_image_builder::<T>()?;
         let block_count = ib.checked_block_count()?;
@@ -638,13 +695,7 @@ impl GeoTiffBuilder {
         data: ArrayView3<T>,
     ) -> Result<()> {
         let (height, width, bands) = data.dim();
-        if width as u32 != self.width || height as u32 != self.height || bands as u32 != self.bands
-        {
-            return Err(Error::DataSizeMismatch {
-                expected: self.height as usize * self.width as usize * self.bands as usize,
-                actual: height * width * bands,
-            });
-        }
+        self.validate_3d_data_shape(height, width, bands)?;
 
         let ib = self.to_image_builder::<T>()?;
         let block_count = ib.checked_block_count()?;
@@ -848,4 +899,17 @@ fn scale_transformation_matrix(mut matrix: [f64; 16], factor: f64) -> [f64; 16] 
         matrix[index] *= factor;
     }
     matrix
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checked_sample_count_rejects_overflow() {
+        let err = checked_sample_count(&[usize::MAX, 2], "actual raster").unwrap_err();
+        assert!(
+            matches!(err, Error::Other(message) if message.contains("sample count overflows usize"))
+        );
+    }
 }

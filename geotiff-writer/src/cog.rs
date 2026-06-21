@@ -22,7 +22,7 @@ use tiff_core::{ByteOrder, Compression, Predictor, Tag, TagType, TagValue, TAG_S
 use tiff_writer::{encoder, ImageBuilder, TiffVariant};
 use tiff_writer::{JpegOptions, LercOptions};
 
-use crate::builder::GeoTiffBuilder;
+use crate::builder::{checked_sample_count, GeoTiffBuilder};
 use crate::error::{Error, Result};
 use crate::sample::{parse_nodata_value, NumericSample};
 
@@ -960,17 +960,7 @@ impl CogBuilder {
         data: ArrayView3<T>,
     ) -> Result<()> {
         let (height, width, bands) = data.dim();
-        if width as u32 != self.inner.width
-            || height as u32 != self.inner.height
-            || bands as u32 != self.inner.bands
-        {
-            return Err(Error::DataSizeMismatch {
-                expected: self.inner.height as usize
-                    * self.inner.width as usize
-                    * self.inner.bands as usize,
-                actual: height * width * bands,
-            });
-        }
+        self.inner.validate_3d_data_shape(height, width, bands)?;
 
         let tw = self.inner.tile_width.unwrap_or(256) as usize;
         let th = self.inner.tile_height.unwrap_or(256) as usize;
@@ -1228,8 +1218,8 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
         }
         if data_b != bands {
             return Err(Error::DataSizeMismatch {
-                expected: data_h * data_w * bands,
-                actual: data_h * data_w * data_b,
+                expected: checked_sample_count(&[data_h, data_w, bands], "expected tile")?,
+                actual: checked_sample_count(&[data_h, data_w, data_b], "actual tile")?,
             });
         }
 

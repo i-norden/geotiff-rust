@@ -11,7 +11,7 @@ use geotiff_writer::{
     GeoKeyValue, GeoTiffBuilder, GeoTransform, InkSet, JpegOptions, LercAdditionalCompression,
     LercOptions, ModelType, PlanarConfiguration, RasterType, TiffVariant,
 };
-use ndarray::{Array2, Array3};
+use ndarray::{Array2, Array3, ShapeBuilder};
 use tiff_core::{Tag, TagValue};
 use tiff_reader::TiffFile;
 use tiff_writer::{ImageBuilder, TiffWriter, WriteOptions};
@@ -462,6 +462,54 @@ fn streaming_tile_writer_rejects_misaligned_offsets_and_band_mismatches() {
         .write_tile_3d(0, 0, &wrong_bands.view())
         .unwrap_err();
     assert!(matches!(err, GeoTiffWriteError::DataSizeMismatch { .. }));
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn high_level_writer_rejects_shapes_that_exceed_u32_without_truncating() {
+    let sample = 7u8;
+    let huge_width = u32::MAX as usize + 2;
+    // Safety: zero strides make every logical element resolve to `sample`,
+    // which remains alive until the view is no longer used.
+    let huge_2d = unsafe {
+        ndarray::ArrayView2::from_shape_ptr(
+            (1, huge_width).strides((0, 0)),
+            std::ptr::addr_of!(sample),
+        )
+    };
+    let mut buf = Cursor::new(Vec::new());
+    let err = GeoTiffBuilder::new(1, 1)
+        .write_2d_to(&mut buf, huge_2d)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        GeoTiffWriteError::DataSizeMismatch {
+            expected: 1,
+            actual
+        } if actual == huge_width
+    ));
+
+    let huge_bands = u32::MAX as usize + 3;
+    // Safety: zero strides make every logical element resolve to `sample`,
+    // which remains alive until the view is no longer used.
+    let huge_3d = unsafe {
+        ndarray::ArrayView3::from_shape_ptr(
+            (1, 1, huge_bands).strides((0, 0, 0)),
+            std::ptr::addr_of!(sample),
+        )
+    };
+    let mut buf = Cursor::new(Vec::new());
+    let err = GeoTiffBuilder::new(1, 1)
+        .bands(2)
+        .write_3d_to(&mut buf, huge_3d)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        GeoTiffWriteError::DataSizeMismatch {
+            expected: 2,
+            actual
+        } if actual == huge_bands
+    ));
 }
 
 #[test]

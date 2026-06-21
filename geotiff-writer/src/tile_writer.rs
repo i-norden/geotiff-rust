@@ -7,7 +7,7 @@ use ndarray::ArrayView2;
 use tiff_core::PlanarConfiguration;
 use tiff_writer::{ImageHandle, TiffWriter, WriteOptions};
 
-use crate::builder::GeoTiffBuilder;
+use crate::builder::{checked_sample_count, GeoTiffBuilder};
 use crate::error::{Error, Result};
 use crate::sample::{nodata_fill_or_zero, NumericSample, WriteSample};
 
@@ -171,8 +171,8 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
         }
         if data_b != spp {
             return Err(Error::DataSizeMismatch {
-                expected: data_h * data_w * spp,
-                actual: data_h * data_w * data_b,
+                expected: checked_sample_count(&[data_h, data_w, spp], "expected tile")?,
+                actual: checked_sample_count(&[data_h, data_w, data_b], "actual tile")?,
             });
         }
         if matches!(self.planar_configuration, PlanarConfiguration::Planar) {
