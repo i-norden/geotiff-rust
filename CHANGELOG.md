@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.7.0 - 2026-06-20
+
+- make memory-mapped local reads explicit through `open_mmap` / `open_mmap_with_options` and keep default file opens on safe file-backed I/O
+- add decoded output allocation budgets to TIFF `OpenOptions` and enforce them before full-image, window, and color-decoded output buffers are allocated
+- check tiled-read tile counts and tile indexes for `usize` overflow before reading tile payloads, and reject GeoTIFF writer input shapes whose dimensions or sample counts cannot be represented without overflow or truncation
+- restore HTTPS-ready remote COG reads with a Rustls TLS feature, default connect/read/request timeouts, custom request headers, and preconfigured blocking client support
+- reject GeoTIFF and COG band counts above the TIFF `SamplesPerPixel` limit instead of narrowing them into invalid metadata
+- stream one-shot COG overview generation tile-by-tile so overviews no longer require full intermediate overview arrays
+- add a CodeQL workflow, run integration benchmark targets from `scripts/run-reference-benchmarks.sh`, and keep benchmark-only mmap paths behind explicit mmap open helpers
+
 ## 0.6.1 - 2026-06-10
 
 - replace C-backed TIFF ZSTD read/write dependencies with pure-Rust `ruzstd` for `ZSTD` and `LERC+ZSTD` blocks
