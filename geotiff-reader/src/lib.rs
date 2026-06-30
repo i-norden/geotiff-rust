@@ -56,6 +56,11 @@ use geotiff_core::tags::{
     TAG_SUBFILE_TYPE,
 };
 
+#[cfg(feature = "local")]
+const MAX_SUBIFD_OVERVIEW_NODES: usize = 1024;
+#[cfg(feature = "local")]
+const MAX_SUBIFD_OVERVIEW_DEPTH: usize = 32;
+
 /// A GeoTIFF file handle with geospatial metadata.
 #[cfg(feature = "local")]
 pub struct GeoTiffFile {
@@ -575,11 +580,11 @@ fn collect_subifd_overviews(
     seen_offsets: &mut HashSet<u64>,
     overviews: &mut Vec<GeoImageIfd>,
 ) -> Result<()> {
-    for &offset in offsets {
-        if !seen_offsets.insert(offset) {
-            continue;
-        }
+    let mut pending = Vec::new();
+    let mut visited_nodes = 0usize;
+    push_subifd_offsets(offsets, 1, seen_offsets, &mut pending, &mut visited_nodes)?;
 
+    while let Some((offset, depth)) = pending.pop() {
         let candidate = tiff.read_ifd_at_offset(offset)?;
         if is_overview_ifd(base_ifd, &candidate) {
             overviews.push(GeoImageIfd {
@@ -587,10 +592,48 @@ fn collect_subifd_overviews(
                 ifd: candidate.clone(),
             });
         }
+
         if let Some(child_offsets) = candidate.sub_ifd_offsets() {
-            collect_subifd_overviews(tiff, base_ifd, &child_offsets, seen_offsets, overviews)?;
+            push_subifd_offsets(
+                &child_offsets,
+                depth + 1,
+                seen_offsets,
+                &mut pending,
+                &mut visited_nodes,
+            )?;
         }
     }
+
+    Ok(())
+}
+
+#[cfg(feature = "local")]
+fn push_subifd_offsets(
+    offsets: &[u64],
+    depth: usize,
+    seen_offsets: &mut HashSet<u64>,
+    pending: &mut Vec<(u64, usize)>,
+    visited_nodes: &mut usize,
+) -> Result<()> {
+    if depth > MAX_SUBIFD_OVERVIEW_DEPTH {
+        return Err(Error::Other(format!(
+            "SubIFD overview traversal exceeds depth budget of {MAX_SUBIFD_OVERVIEW_DEPTH}"
+        )));
+    }
+
+    for &offset in offsets.iter().rev() {
+        if *visited_nodes >= MAX_SUBIFD_OVERVIEW_NODES {
+            return Err(Error::Other(format!(
+                "SubIFD overview traversal exceeds node budget of {MAX_SUBIFD_OVERVIEW_NODES}"
+            )));
+        }
+        *visited_nodes += 1;
+
+        if seen_offsets.insert(offset) {
+            pending.push((offset, depth));
+        }
+    }
+
     Ok(())
 }
 
@@ -695,7 +738,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::GeoTiffFile;
+    use super::{GeoTiffFile, MAX_SUBIFD_OVERVIEW_DEPTH, MAX_SUBIFD_OVERVIEW_NODES};
 
     #[derive(Clone)]
     struct TestIfdSpec {
@@ -982,6 +1025,165 @@ mod tests {
             bytes[pointer_offset + 2],
             bytes[pointer_offset + 3],
         ])
+    }
+
+    fn overwrite_classic_long_tag_values(bytes: &mut [u8], tag_code: u16, values: &[u32]) {
+        overwrite_classic_long_tag_values_at(bytes, 8, tag_code, values);
+    }
+
+    fn overwrite_classic_long_tag_values_at(
+        bytes: &mut [u8],
+        ifd_offset: usize,
+        tag_code: u16,
+        values: &[u32],
+    ) {
+        let entry_count = u16::from_le_bytes([bytes[ifd_offset], bytes[ifd_offset + 1]]) as usize;
+        let mut offset = ifd_offset + 2;
+        for _ in 0..entry_count {
+            let code = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+            if code == tag_code {
+                let type_code = u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]);
+                let count = u32::from_le_bytes([
+                    bytes[offset + 4],
+                    bytes[offset + 5],
+                    bytes[offset + 6],
+                    bytes[offset + 7],
+                ]) as usize;
+                assert_eq!(type_code, 4, "tag {tag_code} is not a LONG tag");
+                assert_eq!(count, values.len(), "tag {tag_code} value count mismatch");
+
+                if values.len() == 1 {
+                    bytes[offset + 8..offset + 12].copy_from_slice(&le_u32(values[0]));
+                } else {
+                    let value_offset = u32::from_le_bytes([
+                        bytes[offset + 8],
+                        bytes[offset + 9],
+                        bytes[offset + 10],
+                        bytes[offset + 11],
+                    ]) as usize;
+                    for (index, value) in values.iter().enumerate() {
+                        let value_offset = value_offset + index * 4;
+                        bytes[value_offset..value_offset + 4].copy_from_slice(&le_u32(*value));
+                    }
+                }
+                return;
+            }
+            offset += 12;
+        }
+        panic!("tag {tag_code} not found in classic TIFF at offset {ifd_offset}");
+    }
+
+    fn top_level_ifd_offsets_after_first(bytes: &[u8], count: usize) -> Vec<u32> {
+        let mut offsets = Vec::with_capacity(count);
+        let mut offset = first_ifd_next_pointer(bytes);
+        while offset != 0 && offsets.len() < count {
+            offsets.push(offset);
+            offset = ifd_next_pointer(bytes, offset as usize);
+        }
+        assert_eq!(offsets.len(), count);
+        offsets
+    }
+
+    fn subifd_budget_base(subifd_count: u32) -> TestIfdSpec {
+        let geo_keys = [1u16, 1, 0, 2, 1024, 0, 1, 2, 2048, 0, 1, 4326];
+        TestIfdSpec {
+            image_data: vec![0u8],
+            entries: vec![
+                (256u16, 4u16, 1u32, le_u32(64).to_vec()),
+                (257u16, 4u16, 1u32, le_u32(64).to_vec()),
+                (258u16, 3u16, 1u32, inline_short(8)),
+                (259u16, 3u16, 1u32, inline_short(1)),
+                (273u16, 4u16, 1u32, vec![]),
+                (277u16, 3u16, 1u32, inline_short(1)),
+                (278u16, 4u16, 1u32, le_u32(64).to_vec()),
+                (279u16, 4u16, 1u32, le_u32(1).to_vec()),
+                (
+                    330u16,
+                    4u16,
+                    subifd_count,
+                    vec![0; subifd_count as usize * 4],
+                ),
+                (
+                    33550u16,
+                    12u16,
+                    3u32,
+                    [2.0, 2.0, 0.0]
+                        .iter()
+                        .flat_map(|value| le_f64(*value))
+                        .collect(),
+                ),
+                (
+                    33922u16,
+                    12u16,
+                    6u32,
+                    [0.0, 0.0, 0.0, 100.0, 200.0, 0.0]
+                        .iter()
+                        .flat_map(|value| le_f64(*value))
+                        .collect(),
+                ),
+                (
+                    34735u16,
+                    3u16,
+                    geo_keys.len() as u32,
+                    geo_keys.iter().flat_map(|value| le_u16(*value)).collect(),
+                ),
+            ],
+        }
+    }
+
+    fn subifd_budget_overview(has_child: bool) -> TestIfdSpec {
+        let mut entries = vec![
+            (254u16, 4u16, 1u32, le_u32(1).to_vec()),
+            (256u16, 4u16, 1u32, le_u32(1).to_vec()),
+            (257u16, 4u16, 1u32, le_u32(1).to_vec()),
+            (258u16, 3u16, 1u32, inline_short(8)),
+            (259u16, 3u16, 1u32, inline_short(1)),
+            (273u16, 4u16, 1u32, vec![]),
+            (277u16, 3u16, 1u32, inline_short(1)),
+            (278u16, 4u16, 1u32, le_u32(1).to_vec()),
+            (279u16, 4u16, 1u32, le_u32(1).to_vec()),
+        ];
+        if has_child {
+            entries.push((330u16, 4u16, 1u32, le_u32(0).to_vec()));
+        }
+        TestIfdSpec {
+            image_data: vec![0u8],
+            entries,
+        }
+    }
+
+    fn build_geotiff_exceeding_subifd_node_budget() -> Vec<u8> {
+        let child_count = MAX_SUBIFD_OVERVIEW_NODES + 1;
+        let mut ifds = Vec::with_capacity(child_count + 1);
+        ifds.push(subifd_budget_base(child_count as u32));
+        ifds.extend((0..child_count).map(|_| subifd_budget_overview(false)));
+
+        let mut bytes = build_classic_tiff(&ifds);
+        let child_offsets = top_level_ifd_offsets_after_first(&bytes, child_count);
+        overwrite_classic_long_tag_values(&mut bytes, 330, &child_offsets);
+        overwrite_first_ifd_next_pointer(&mut bytes, 0);
+        bytes
+    }
+
+    fn build_geotiff_exceeding_subifd_depth_budget() -> Vec<u8> {
+        let child_count = MAX_SUBIFD_OVERVIEW_DEPTH + 1;
+        let mut ifds = Vec::with_capacity(child_count + 1);
+        ifds.push(subifd_budget_base(1));
+        ifds.extend((0..child_count).map(|index| subifd_budget_overview(index + 1 < child_count)));
+
+        let mut bytes = build_classic_tiff(&ifds);
+        let child_offsets = top_level_ifd_offsets_after_first(&bytes, child_count);
+        overwrite_classic_long_tag_values(&mut bytes, 330, &child_offsets[..1]);
+        for offsets in child_offsets.windows(2) {
+            overwrite_classic_long_tag_values_at(
+                &mut bytes,
+                offsets[0] as usize,
+                330,
+                &offsets[1..],
+            );
+        }
+        overwrite_first_ifd_next_pointer(&mut bytes, 0);
+        bytes
     }
 
     fn build_geotiff_with_overview() -> Vec<u8> {
@@ -1375,6 +1577,28 @@ mod tests {
         let second = file.read_overview::<u8>(1).unwrap();
         assert_eq!(second.shape(), &[1, 1]);
         assert_eq!(second[[0, 0]], 99);
+    }
+
+    #[test]
+    fn rejects_subifd_overview_node_budget() {
+        let error = match GeoTiffFile::from_bytes(build_geotiff_exceeding_subifd_node_budget()) {
+            Ok(_) => panic!("expected SubIFD overview node budget error"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("SubIFD overview traversal exceeds node budget"));
+    }
+
+    #[test]
+    fn rejects_subifd_overview_depth_budget() {
+        let error = match GeoTiffFile::from_bytes(build_geotiff_exceeding_subifd_depth_budget()) {
+            Ok(_) => panic!("expected SubIFD overview depth budget error"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("SubIFD overview traversal exceeds depth budget"));
     }
 
     #[test]

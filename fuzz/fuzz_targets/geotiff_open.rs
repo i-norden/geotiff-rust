@@ -3,6 +3,9 @@
 use geotiff_reader::GeoTiffFile;
 use libfuzzer_sys::fuzz_target;
 
+const MAX_DECODED_BYTES: usize = 8 * 1024 * 1024;
+const MAX_OVERVIEWS: usize = 8;
+
 fuzz_target!(|data: &[u8]| {
     if data.len() < 8 {
         return;
@@ -20,6 +23,23 @@ fuzz_target!(|data: &[u8]| {
         let _ = transform.pixel_to_geo(0.0, 0.0);
         let _ = transform.geo_to_pixel(0.0, 0.0);
     });
+    for overview_index in 0..file.overview_count().min(MAX_OVERVIEWS) {
+        let _ = file.overview_ifd_index(overview_index);
+        let Ok(ifd) = file.overview_ifd(overview_index) else {
+            continue;
+        };
+        let Ok(layout) = ifd.raster_layout() else {
+            continue;
+        };
+        let Some(decoded_len) = layout.row_bytes().checked_mul(layout.height) else {
+            continue;
+        };
+        if decoded_len > MAX_DECODED_BYTES {
+            continue;
+        }
+
+        let _ = file.read_overview::<u8>(overview_index);
+    }
 
     let Ok(ifd) = file.tiff().ifd(0) else {
         return;
@@ -30,7 +50,7 @@ fuzz_target!(|data: &[u8]| {
     let Some(decoded_len) = layout.row_bytes().checked_mul(layout.height) else {
         return;
     };
-    if decoded_len > 8 * 1024 * 1024 {
+    if decoded_len > MAX_DECODED_BYTES {
         return;
     }
 
