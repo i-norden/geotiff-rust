@@ -377,14 +377,20 @@ impl Ifd {
                     )?;
                     Ok(ColorModel::Cmyk { extra_samples })
                 } else {
-                    let color_channels = samples_per_pixel
-                        .checked_sub(extra_samples.len() as u16)
+                    let color_channels = usize::from(samples_per_pixel)
+                        .checked_sub(extra_samples.len())
                         .ok_or_else(|| {
                             Error::InvalidImageLayout(format!(
                                 "{} photometric interpretation defines more ExtraSamples than total channels",
                                 photometric_name(photometric)
                             ))
                         })?;
+                    let color_channels = u16::try_from(color_channels).map_err(|_| {
+                        Error::InvalidImageLayout(format!(
+                            "{} photometric interpretation color channel count exceeds u16",
+                            photometric_name(photometric)
+                        ))
+                    })?;
                     Ok(ColorModel::Separated {
                         ink_set,
                         color_channels,
@@ -504,7 +510,7 @@ impl Ifd {
             ));
         }
 
-        validate_color_model(self, samples_per_pixel as u16, first_bits)?;
+        validate_color_model(self, samples_per_pixel, first_bits)?;
 
         Ok(RasterLayout {
             width: width as usize,
@@ -806,7 +812,7 @@ fn color_map_is_u8_equivalent(color_map: &ColorMap) -> bool {
         .all(|&value| value % 257 == 0)
 }
 
-fn validate_color_model(ifd: &Ifd, samples_per_pixel: u16, bits_per_sample: u16) -> Result<()> {
+fn validate_color_model(ifd: &Ifd, samples_per_pixel: usize, bits_per_sample: u16) -> Result<()> {
     let color_model = ifd.color_model()?;
 
     match &color_model {
@@ -852,7 +858,11 @@ fn validate_color_model(ifd: &Ifd, samples_per_pixel: u16, bits_per_sample: u16)
                         .into(),
                 ));
             }
-            validate_expected_samples(samples_per_pixel, *color_channels, extra_samples.len())?;
+            validate_expected_samples(
+                samples_per_pixel,
+                usize::from(*color_channels),
+                extra_samples.len(),
+            )?;
         }
         ColorModel::YCbCr {
             subsampling,
@@ -886,12 +896,12 @@ fn validate_color_model(ifd: &Ifd, samples_per_pixel: u16, bits_per_sample: u16)
 }
 
 fn validate_expected_samples(
-    samples_per_pixel: u16,
-    base_samples: u16,
+    samples_per_pixel: usize,
+    base_samples: usize,
     extra_sample_count: usize,
 ) -> Result<()> {
     let expected_samples = base_samples
-        .checked_add(extra_sample_count as u16)
+        .checked_add(extra_sample_count)
         .ok_or_else(|| Error::InvalidImageLayout("samples per pixel overflow".into()))?;
     if samples_per_pixel != expected_samples {
         return Err(Error::InvalidImageLayout(format!(
@@ -1152,6 +1162,36 @@ mod tests {
         ));
         assert_eq!(ifd.ink_set().unwrap(), Some(InkSet::Cmyk));
         assert_eq!(ifd.raster_layout().unwrap().samples_per_pixel, 4);
+    }
+
+    #[test]
+    fn rejects_non_cmyk_separated_extra_samples_that_exceed_total_channels() {
+        let ifd = make_ifd(vec![
+            Tag::new(TAG_IMAGE_WIDTH, TagValue::Long(vec![1])),
+            Tag::new(TAG_IMAGE_LENGTH, TagValue::Long(vec![1])),
+            Tag::new(TAG_SAMPLES_PER_PIXEL, TagValue::Short(vec![1])),
+            Tag::new(TAG_BITS_PER_SAMPLE, TagValue::Short(vec![8])),
+            Tag::new(TAG_SAMPLE_FORMAT, TagValue::Short(vec![1])),
+            Tag::new(TAG_PHOTOMETRIC_INTERPRETATION, TagValue::Short(vec![5])),
+            Tag::new(TAG_INK_SET, TagValue::Short(vec![2])),
+            Tag::new(
+                TAG_EXTRA_SAMPLES,
+                TagValue::Short(vec![0; usize::from(u16::MAX) + 1]),
+            ),
+        ]);
+
+        let error = ifd.color_model().unwrap_err();
+        assert!(
+            matches!(error, crate::error::Error::InvalidImageLayout(message) if message.contains("more ExtraSamples than total channels"))
+        );
+    }
+
+    #[test]
+    fn validate_expected_samples_rejects_extra_sample_count_that_would_wrap_u16() {
+        let error = super::validate_expected_samples(1, 1, usize::from(u16::MAX) + 1).unwrap_err();
+        assert!(
+            matches!(error, crate::error::Error::InvalidImageLayout(message) if message.contains("does not match color model base channels"))
+        );
     }
 
     #[test]
