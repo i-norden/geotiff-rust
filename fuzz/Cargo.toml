@@ -25,3 +25,10 @@ path = "fuzz_targets/geotiff_open.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "geotiff_subifd_overviews"
+path = "fuzz_targets/geotiff_subifd_overviews.rs"
+test = false
+doc = false
+bench = false

@@ -150,11 +150,13 @@ writer rejects the block before writing incompatible TIFF metadata.
 `from_source_with_options` accept `OpenOptions` with `ParseBudgets` for bounding
 IFD chain length, tag counts, and metadata payload bytes. `GeoTiffFile`
 exposes the same settings as `GeoTiffOpenOptions`, and HTTP COG opens pass them
-through `HttpOpenOptions::tiff_options`. The reader also derives encoded
-strip/tile read limits and decompressed output limits from the raster layout
-before reading block payloads. `OpenOptions::decode_output_bytes` bounds each
-decoded output buffer allocation; raise it only when intentionally decoding
-larger windows or full rasters.
+through `HttpOpenOptions::tiff_options`. GeoTIFF SubIFD overview discovery is
+also bounded by explicit node and depth limits before following arbitrary
+SubIFD offsets. The reader derives encoded strip/tile read limits and
+decompressed output limits from the raster layout before reading block
+payloads. `OpenOptions::decode_output_bytes` bounds each decoded output buffer
+allocation; raise it only when intentionally decoding larger windows or full
+rasters.
 
 Remote COG opens use bounded connect, read, and per-request timeouts by default.
 `HttpOpenOptions` also accepts per-request headers and an optional custom
