@@ -14,8 +14,8 @@ use crate::header::ByteOrder;
 use crate::ifd::{Ifd, RasterLayout};
 use crate::source::TiffSource;
 use crate::{
-    allocate_decode_output, read_block_payload, read_gdal_block_payload, DecodeReadOptions,
-    GdalStructuralMetadata, Window,
+    allocate_decode_output, checked_layout_add, checked_layout_mul, read_block_payload,
+    read_gdal_block_payload, DecodeReadOptions, GdalStructuralMetadata, Window,
 };
 
 const TAG_JPEG_TABLES: u16 = 347;
@@ -51,7 +51,7 @@ pub(crate) fn read_window(
                 &layout,
                 options.gdal_structural_metadata,
             )?;
-            copy_tile_window_block(&mut output.lock(), block.as_slice(), spec, &layout, window);
+            copy_tile_window_block(&mut output.lock(), block.as_slice(), spec, &layout, window)?;
             Ok::<(), Error>(())
         })?;
     }
@@ -67,7 +67,7 @@ pub(crate) fn read_window(
             &layout,
             options.gdal_structural_metadata,
         )?;
-        copy_tile_window_block(&mut output, block.as_slice(), spec, &layout, window);
+        copy_tile_window_block(&mut output, block.as_slice(), spec, &layout, window)?;
     }
 
     Ok(output)
@@ -118,7 +118,7 @@ pub(crate) fn read_window_band(
                 &layout,
                 window,
                 band_index,
-            );
+            )?;
             Ok::<(), Error>(())
         })?;
     }
@@ -141,7 +141,7 @@ pub(crate) fn read_window_band(
             &layout,
             window,
             band_index,
-        );
+        )?;
     }
 
     Ok(output)
@@ -153,51 +153,113 @@ fn copy_tile_window_block(
     spec: TileBlockSpec,
     layout: &RasterLayout,
     window: Window,
-) {
+) -> Result<()> {
+    let pixel_stride = layout.checked_pixel_stride_bytes()?;
     let window_row_end = window.row_end();
     let window_col_end = window.col_end();
-    let output_row_bytes = window.cols * layout.pixel_stride_bytes();
+    let output_row_bytes = checked_layout_mul(window.cols, pixel_stride, "window row byte count")?;
     let copy_row_start = spec.y.max(window.row_off);
-    let copy_row_end = (spec.y + spec.rows_in_tile).min(window_row_end);
+    let copy_row_end =
+        checked_layout_add(spec.y, spec.rows_in_tile, "tile row range")?.min(window_row_end);
     let copy_col_start = spec.x.max(window.col_off);
-    let copy_col_end = (spec.x + spec.cols_in_tile).min(window_col_end);
+    let copy_col_end =
+        checked_layout_add(spec.x, spec.cols_in_tile, "tile column range")?.min(window_col_end);
 
-    let src_row_bytes = spec.tile_width
-        * if layout.planar_configuration == 1 {
-            layout.pixel_stride_bytes()
+    let src_row_bytes = checked_layout_mul(
+        spec.tile_width,
+        if layout.planar_configuration == 1 {
+            pixel_stride
         } else {
             layout.bytes_per_sample
-        };
+        },
+        "tile source row byte count",
+    )?;
 
     if layout.planar_configuration == 1 {
-        let copy_bytes_per_row = (copy_col_end - copy_col_start) * layout.pixel_stride_bytes();
+        let copy_bytes_per_row = checked_layout_mul(
+            copy_col_end - copy_col_start,
+            pixel_stride,
+            "tile copy row byte count",
+        )?;
+        let src_col_offset = checked_layout_mul(
+            copy_col_start - spec.x,
+            pixel_stride,
+            "tile source column offset",
+        )?;
+        let dest_col_offset = checked_layout_mul(
+            copy_col_start - window.col_off,
+            pixel_stride,
+            "tile output column offset",
+        )?;
         for row in copy_row_start..copy_row_end {
             let src_row_index = row - spec.y;
             let dest_row_index = row - window.row_off;
-            let src_offset = src_row_index * src_row_bytes
-                + (copy_col_start - spec.x) * layout.pixel_stride_bytes();
-            let dest_offset = dest_row_index * output_row_bytes
-                + (copy_col_start - window.col_off) * layout.pixel_stride_bytes();
-            output[dest_offset..dest_offset + copy_bytes_per_row]
-                .copy_from_slice(&block[src_offset..src_offset + copy_bytes_per_row]);
+            let src_offset = checked_layout_add(
+                checked_layout_mul(src_row_index, src_row_bytes, "tile source row offset")?,
+                src_col_offset,
+                "tile source offset",
+            )?;
+            let dest_offset = checked_layout_add(
+                checked_layout_mul(dest_row_index, output_row_bytes, "tile output row offset")?,
+                dest_col_offset,
+                "tile output offset",
+            )?;
+            let src_end =
+                checked_layout_add(src_offset, copy_bytes_per_row, "tile source copy range")?;
+            let dest_end =
+                checked_layout_add(dest_offset, copy_bytes_per_row, "tile output copy range")?;
+            output[dest_offset..dest_end].copy_from_slice(&block[src_offset..src_end]);
         }
     } else {
+        let plane_offset = checked_layout_mul(
+            spec.plane,
+            layout.bytes_per_sample,
+            "tile plane byte offset",
+        )?;
         for row in copy_row_start..copy_row_end {
             let src_row_index = row - spec.y;
             let dest_row_index = row - window.row_off;
-            let src_row =
-                &block[src_row_index * src_row_bytes..(src_row_index + 1) * src_row_bytes];
-            let dest_row = &mut output
-                [dest_row_index * output_row_bytes..(dest_row_index + 1) * output_row_bytes];
+            let src_row_offset =
+                checked_layout_mul(src_row_index, src_row_bytes, "tile source row offset")?;
+            let src_row_end =
+                checked_layout_add(src_row_offset, src_row_bytes, "tile source row range")?;
+            let dest_row_offset =
+                checked_layout_mul(dest_row_index, output_row_bytes, "tile output row offset")?;
+            let dest_row_end =
+                checked_layout_add(dest_row_offset, output_row_bytes, "tile output row range")?;
+            let src_row = &block[src_row_offset..src_row_end];
+            let dest_row = &mut output[dest_row_offset..dest_row_end];
             for col in copy_col_start..copy_col_end {
-                let src = &src_row[(col - spec.x) * layout.bytes_per_sample
-                    ..(col - spec.x + 1) * layout.bytes_per_sample];
-                let pixel_base = (col - window.col_off) * layout.pixel_stride_bytes()
-                    + spec.plane * layout.bytes_per_sample;
-                dest_row[pixel_base..pixel_base + layout.bytes_per_sample].copy_from_slice(src);
+                let src_offset = checked_layout_mul(
+                    col - spec.x,
+                    layout.bytes_per_sample,
+                    "tile source column offset",
+                )?;
+                let src_end = checked_layout_add(
+                    src_offset,
+                    layout.bytes_per_sample,
+                    "tile source sample range",
+                )?;
+                let src = &src_row[src_offset..src_end];
+                let pixel_base = checked_layout_add(
+                    checked_layout_mul(
+                        col - window.col_off,
+                        pixel_stride,
+                        "tile output pixel offset",
+                    )?,
+                    plane_offset,
+                    "tile output sample offset",
+                )?;
+                let pixel_end = checked_layout_add(
+                    pixel_base,
+                    layout.bytes_per_sample,
+                    "tile output sample range",
+                )?;
+                dest_row[pixel_base..pixel_end].copy_from_slice(src);
             }
         }
     }
+    Ok(())
 }
 
 fn copy_tile_band_window_block(
@@ -207,52 +269,110 @@ fn copy_tile_band_window_block(
     layout: &RasterLayout,
     window: Window,
     band_index: usize,
-) {
+) -> Result<()> {
+    let pixel_stride = layout.checked_pixel_stride_bytes()?;
     let window_row_end = window.row_end();
     let window_col_end = window.col_end();
-    let output_row_bytes = window.cols * layout.bytes_per_sample;
+    let output_row_bytes = checked_layout_mul(
+        window.cols,
+        layout.bytes_per_sample,
+        "window band row byte count",
+    )?;
     let copy_row_start = spec.y.max(window.row_off);
-    let copy_row_end = (spec.y + spec.rows_in_tile).min(window_row_end);
+    let copy_row_end =
+        checked_layout_add(spec.y, spec.rows_in_tile, "tile row range")?.min(window_row_end);
     let copy_col_start = spec.x.max(window.col_off);
-    let copy_col_end = (spec.x + spec.cols_in_tile).min(window_col_end);
+    let copy_col_end =
+        checked_layout_add(spec.x, spec.cols_in_tile, "tile column range")?.min(window_col_end);
 
-    let src_row_bytes = spec.tile_width
-        * if layout.planar_configuration == 1 {
-            layout.pixel_stride_bytes()
+    let src_row_bytes = checked_layout_mul(
+        spec.tile_width,
+        if layout.planar_configuration == 1 {
+            pixel_stride
         } else {
             layout.bytes_per_sample
-        };
+        },
+        "tile source row byte count",
+    )?;
 
     if layout.planar_configuration == 1 {
-        let band_offset = band_index * layout.bytes_per_sample;
+        let band_offset =
+            checked_layout_mul(band_index, layout.bytes_per_sample, "band byte offset")?;
         for row in copy_row_start..copy_row_end {
             let src_row_index = row - spec.y;
             let dest_row_index = row - window.row_off;
-            let src_row =
-                &block[src_row_index * src_row_bytes..(src_row_index + 1) * src_row_bytes];
-            let dest_row = &mut output
-                [dest_row_index * output_row_bytes..(dest_row_index + 1) * output_row_bytes];
+            let src_row_offset =
+                checked_layout_mul(src_row_index, src_row_bytes, "tile source row offset")?;
+            let src_row_end =
+                checked_layout_add(src_row_offset, src_row_bytes, "tile source row range")?;
+            let dest_row_offset =
+                checked_layout_mul(dest_row_index, output_row_bytes, "tile output row offset")?;
+            let dest_row_end =
+                checked_layout_add(dest_row_offset, output_row_bytes, "tile output row range")?;
+            let src_row = &block[src_row_offset..src_row_end];
+            let dest_row = &mut output[dest_row_offset..dest_row_end];
             for col in copy_col_start..copy_col_end {
-                let src_base = (col - spec.x) * layout.pixel_stride_bytes() + band_offset;
+                let src_base = checked_layout_add(
+                    checked_layout_mul(col - spec.x, pixel_stride, "tile source column offset")?,
+                    band_offset,
+                    "tile source band offset",
+                )?;
                 let dest_col_index = col - window.col_off;
-                let dest_base = dest_col_index * layout.bytes_per_sample;
-                dest_row[dest_base..dest_base + layout.bytes_per_sample]
-                    .copy_from_slice(&src_row[src_base..src_base + layout.bytes_per_sample]);
+                let dest_base = checked_layout_mul(
+                    dest_col_index,
+                    layout.bytes_per_sample,
+                    "tile output sample offset",
+                )?;
+                let src_end = checked_layout_add(
+                    src_base,
+                    layout.bytes_per_sample,
+                    "tile source sample range",
+                )?;
+                let dest_end = checked_layout_add(
+                    dest_base,
+                    layout.bytes_per_sample,
+                    "tile output sample range",
+                )?;
+                dest_row[dest_base..dest_end].copy_from_slice(&src_row[src_base..src_end]);
             }
         }
     } else {
-        let copy_bytes_per_row = (copy_col_end - copy_col_start) * layout.bytes_per_sample;
+        let copy_bytes_per_row = checked_layout_mul(
+            copy_col_end - copy_col_start,
+            layout.bytes_per_sample,
+            "tile copy row byte count",
+        )?;
+        let src_col_offset = checked_layout_mul(
+            copy_col_start - spec.x,
+            layout.bytes_per_sample,
+            "tile source column offset",
+        )?;
+        let dest_col_offset = checked_layout_mul(
+            copy_col_start - window.col_off,
+            layout.bytes_per_sample,
+            "tile output column offset",
+        )?;
         for row in copy_row_start..copy_row_end {
             let src_row_index = row - spec.y;
             let dest_row_index = row - window.row_off;
-            let src_offset =
-                src_row_index * src_row_bytes + (copy_col_start - spec.x) * layout.bytes_per_sample;
-            let dest_offset = dest_row_index * output_row_bytes
-                + (copy_col_start - window.col_off) * layout.bytes_per_sample;
-            output[dest_offset..dest_offset + copy_bytes_per_row]
-                .copy_from_slice(&block[src_offset..src_offset + copy_bytes_per_row]);
+            let src_offset = checked_layout_add(
+                checked_layout_mul(src_row_index, src_row_bytes, "tile source row offset")?,
+                src_col_offset,
+                "tile source offset",
+            )?;
+            let dest_offset = checked_layout_add(
+                checked_layout_mul(dest_row_index, output_row_bytes, "tile output row offset")?,
+                dest_col_offset,
+                "tile output offset",
+            )?;
+            let src_end =
+                checked_layout_add(src_offset, copy_bytes_per_row, "tile source copy range")?;
+            let dest_end =
+                checked_layout_add(dest_offset, copy_bytes_per_row, "tile output copy range")?;
+            output[dest_offset..dest_end].copy_from_slice(&block[src_offset..src_end]);
         }
     }
+    Ok(())
 }
 
 fn collect_tile_specs_for_window(

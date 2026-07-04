@@ -130,9 +130,10 @@ impl Window {
     }
 
     pub(crate) fn output_len(self, layout: &RasterLayout) -> Result<usize> {
+        let pixel_stride = layout.checked_pixel_stride_bytes()?;
         self.cols
             .checked_mul(self.rows)
-            .and_then(|pixels| pixels.checked_mul(layout.pixel_stride_bytes()))
+            .and_then(|pixels| pixels.checked_mul(pixel_stride))
             .ok_or_else(|| Error::InvalidImageLayout("window size overflows usize".into()))
     }
 
@@ -142,6 +143,16 @@ impl Window {
             .and_then(|pixels| pixels.checked_mul(layout.bytes_per_sample))
             .ok_or_else(|| Error::InvalidImageLayout("window band size overflows usize".into()))
     }
+}
+
+pub(crate) fn checked_layout_add(lhs: usize, rhs: usize, context: &'static str) -> Result<usize> {
+    lhs.checked_add(rhs)
+        .ok_or_else(|| Error::InvalidImageLayout(format!("{context} overflows usize")))
+}
+
+pub(crate) fn checked_layout_mul(lhs: usize, rhs: usize, context: &'static str) -> Result<usize> {
+    lhs.checked_mul(rhs)
+        .ok_or_else(|| Error::InvalidImageLayout(format!("{context} overflows usize")))
 }
 
 pub(crate) fn allocate_decode_output(output_len: usize, budget: usize) -> Result<Vec<u8>> {

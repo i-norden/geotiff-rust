@@ -12,6 +12,6 @@ pub mod tag;
 
 pub use byte_order::ByteOrder;
 pub use constants::*;
-pub use layout::RasterLayout;
+pub use layout::{LayoutError, RasterLayout};
 pub use sample::TiffSample;
 pub use tag::{Tag, TagType, TagValue};

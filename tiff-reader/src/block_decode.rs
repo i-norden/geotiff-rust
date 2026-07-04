@@ -76,11 +76,11 @@ pub(crate) fn decode_compressed_block(request: BlockDecodeRequest<'_>) -> Result
             if request.layout.planar_configuration == 1 {
                 request
                     .layout
-                    .packed_row_bytes_for_width(request.block_width)
+                    .checked_packed_row_bytes_for_width(request.block_width)?
             } else {
                 request
                     .layout
-                    .packed_sample_plane_row_bytes_for_width(request.block_width)
+                    .checked_packed_sample_plane_row_bytes_for_width(request.block_width)?
             }
         } else {
             request
@@ -177,11 +177,11 @@ fn expected_encoded_block_len(request: &BlockDecodeRequest<'_>, samples: usize) 
         if request.layout.planar_configuration == 1 {
             request
                 .layout
-                .packed_row_bytes_for_width(request.block_width)
+                .checked_packed_row_bytes_for_width(request.block_width)?
         } else {
             request
                 .layout
-                .packed_sample_plane_row_bytes_for_width(request.block_width)
+                .checked_packed_sample_plane_row_bytes_for_width(request.block_width)?
         }
     } else {
         request
