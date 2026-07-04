@@ -23,7 +23,7 @@ homepage = "https://github.com/roteiro-gis/geotiff-rust"
 [workspace.dependencies]
 ndarray = "0.17"
 thiserror = "2"
-memmap2 = "0.9"
+memmap2 = "0.9.11"
 lerc-core = "0.4.2"
 lerc-reader = "0.4.2"
 lerc-writer = "0.4.2"
