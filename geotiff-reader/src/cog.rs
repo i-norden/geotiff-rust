@@ -166,6 +166,7 @@ impl HttpRangeSource {
                 response.status()
             )));
         }
+        validate_response_content_range(&response, &self.url, start, end, Some(self.len))?;
         let expected_len = usize::try_from(end - start + 1).unwrap_or(usize::MAX);
         let body = read_response_body(
             response,
@@ -359,16 +360,97 @@ fn probe_content_length(
         .get(CONTENT_RANGE)
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| Error::Other(format!("missing Content-Range header for {url}")))?;
-    parse_total_length(content_range).ok_or_else(|| {
+    let content_range = parse_content_range(content_range).ok_or_else(|| {
         Error::Other(format!(
             "unable to parse object size from Content-Range: {content_range}"
+        ))
+    })?;
+    if content_range.start != 0 || content_range.end != 0 {
+        return Err(Error::Other(format!(
+            "unexpected Content-Range for {url}: expected bytes 0-0, got bytes {}-{}",
+            content_range.start, content_range.end
+        )));
+    }
+    content_range.total.ok_or_else(|| {
+        Error::Other(format!(
+            "missing object size in Content-Range for {url}: bytes {}-{}/{}",
+            content_range.start,
+            content_range.end,
+            content_range
+                .total
+                .map(|total| total.to_string())
+                .unwrap_or_else(|| "*".to_string())
         ))
     })
 }
 
+#[cfg(test)]
 fn parse_total_length(content_range: &str) -> Option<u64> {
-    let (_, total) = content_range.split_once('/')?;
-    total.parse().ok()
+    parse_content_range(content_range)?.total
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ParsedContentRange {
+    start: u64,
+    end: u64,
+    total: Option<u64>,
+}
+
+fn parse_content_range(content_range: &str) -> Option<ParsedContentRange> {
+    let (unit, range_and_total) = content_range.trim().split_once(' ')?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return None;
+    }
+    let (range, total) = range_and_total.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    let start = start.parse().ok()?;
+    let end = end.parse().ok()?;
+    if start > end {
+        return None;
+    }
+    let total = if total == "*" {
+        None
+    } else {
+        let total = total.parse().ok()?;
+        if end >= total {
+            return None;
+        }
+        Some(total)
+    };
+    Some(ParsedContentRange { start, end, total })
+}
+
+fn validate_response_content_range(
+    response: &reqwest::blocking::Response,
+    url: &str,
+    expected_start: u64,
+    expected_end: u64,
+    expected_total: Option<u64>,
+) -> Result<()> {
+    let content_range = response
+        .headers()
+        .get(CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| Error::Other(format!("missing Content-Range header for {url}")))?;
+    let parsed = parse_content_range(content_range).ok_or_else(|| {
+        Error::Other(format!(
+            "unable to parse Content-Range for {url}: {content_range}"
+        ))
+    })?;
+    if parsed.start != expected_start || parsed.end != expected_end {
+        return Err(Error::Other(format!(
+            "unexpected Content-Range for {url}: expected bytes {expected_start}-{expected_end}, got bytes {}-{}",
+            parsed.start, parsed.end
+        )));
+    }
+    if let (Some(actual_total), Some(expected_total)) = (parsed.total, expected_total) {
+        if actual_total != expected_total {
+            return Err(Error::Other(format!(
+                "unexpected Content-Range total for {url}: expected {expected_total}, got {actual_total}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -385,11 +467,24 @@ mod tests {
     use reqwest::header::{HeaderMap, HeaderValue};
     use tiff_reader::source::TiffSource;
 
-    use super::{parse_total_length, HttpGeoTiffFile, HttpOpenOptions, HttpRangeSource};
+    use super::{
+        parse_content_range, parse_total_length, HttpGeoTiffFile, HttpOpenOptions, HttpRangeSource,
+    };
 
     #[test]
     fn parses_total_length_from_content_range() {
         assert_eq!(parse_total_length("bytes 0-0/12345"), Some(12345));
+    }
+
+    #[test]
+    fn parses_content_range_start_end_and_total() {
+        let parsed = parse_content_range("bytes 12-34/100").unwrap();
+
+        assert_eq!(parsed.start, 12);
+        assert_eq!(parsed.end, 34);
+        assert_eq!(parsed.total, Some(100));
+        assert_eq!(parse_content_range("bytes 34-12/100"), None);
+        assert_eq!(parse_content_range("items 12-34/100"), None);
     }
 
     #[test]
@@ -449,6 +544,28 @@ mod tests {
         let expected = &bytes[570..570 + 1223];
         let actual = source.read_exact_at(570, 1223).unwrap();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn range_read_rejects_wrong_content_range_start_end() {
+        let Some(server) = TestServer::start_with_content_range_offset(vec![0; 12], 1) else {
+            return;
+        };
+        let source = HttpRangeSource::open(
+            server.url(),
+            HttpOpenOptions {
+                chunk_size: 4,
+                cache_bytes: 0,
+                cache_slots: 0,
+                ..HttpOpenOptions::default()
+            },
+        )
+        .unwrap();
+
+        let error = source.read_exact_at(0, 1).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("Content-Range"), "{message}");
+        assert!(message.contains("expected bytes 0-3"), "{message}");
     }
 
     #[test]
@@ -662,6 +779,13 @@ mod tests {
 
     impl TestServer {
         fn start(bytes: Vec<u8>) -> Option<Self> {
+            Self::start_with_content_range_offset(bytes, 0)
+        }
+
+        fn start_with_content_range_offset(
+            bytes: Vec<u8>,
+            content_range_offset: usize,
+        ) -> Option<Self> {
             let listener = TcpListener::bind("127.0.0.1:0").ok()?;
             listener.set_nonblocking(true).ok()?;
             let addr = listener.local_addr().ok()?;
@@ -691,11 +815,13 @@ mod tests {
 
                             if let Some((start, end)) = range {
                                 let body = &bytes[start..=end];
+                                let reported_start = start.saturating_add(content_range_offset);
+                                let reported_end = end.saturating_add(content_range_offset);
                                 let response = format!(
                                     "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
                                     body.len(),
-                                    start,
-                                    end,
+                                    reported_start,
+                                    reported_end,
                                     bytes.len()
                                 );
                                 let _ = stream.write_all(response.as_bytes());

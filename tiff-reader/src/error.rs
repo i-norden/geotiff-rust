@@ -1,5 +1,5 @@
 use thiserror::Error;
-use tiff_core::Compression;
+use tiff_core::{Compression, LayoutError};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -85,6 +85,12 @@ pub enum Error {
 
     #[error("{0}")]
     Other(String),
+}
+
+impl From<LayoutError> for Error {
+    fn from(error: LayoutError) -> Self {
+        Self::InvalidImageLayout(error.to_string())
+    }
 }
 
 fn unsupported_compression_name(code: u16) -> &'static str {

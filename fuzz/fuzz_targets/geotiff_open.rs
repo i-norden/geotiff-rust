@@ -31,7 +31,10 @@ fuzz_target!(|data: &[u8]| {
         let Ok(layout) = ifd.raster_layout() else {
             continue;
         };
-        let Some(decoded_len) = layout.row_bytes().checked_mul(layout.height) else {
+        let Ok(row_bytes) = layout.checked_row_bytes() else {
+            continue;
+        };
+        let Some(decoded_len) = row_bytes.checked_mul(layout.height) else {
             continue;
         };
         if decoded_len > MAX_DECODED_BYTES {
@@ -47,7 +50,10 @@ fuzz_target!(|data: &[u8]| {
     let Ok(layout) = ifd.raster_layout() else {
         return;
     };
-    let Some(decoded_len) = layout.row_bytes().checked_mul(layout.height) else {
+    let Ok(row_bytes) = layout.checked_row_bytes() else {
+        return;
+    };
+    let Some(decoded_len) = row_bytes.checked_mul(layout.height) else {
         return;
     };
     if decoded_len > MAX_DECODED_BYTES {
