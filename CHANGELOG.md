@@ -14,6 +14,7 @@ Breaking changes:
 Other changes:
 
 - add optional `f16` features to the TIFF and GeoTIFF readers/writers, enabling `half::f16` rasters encoded as `SampleFormat=Float` with 16 bits per sample
+- decode WebP-compressed TIFF blocks (compression 50001) behind a new default `webp` feature on `tiff-reader`, using the pure-Rust `image-webp` crate with the standard decoded-size budget checks
 - write interleaved YCbCr JPEG (the standard web-visualization COG configuration): chunky 3-sample JPEG blocks with `PhotometricInterpretation::YCbCr` encode with 2x2 chroma subsampling by default, emit the matching `YCbCrSubsampling` tag, and validate against GDAL; `BlockEncodingOptions` gains a `jpeg_sampling` field
 - add sparse tile/strip writing via `GeoTiffBuilder::sparse(true)` (GDAL `SPARSE_OK` semantics): all-zero blocks are recorded with zero offsets and byte counts across plain, streaming, and COG write paths, and `TiffWriter::write_block_sparse` exposes the primitive
 - add a property-based writer→reader roundtrip suite covering sample types, compressions, predictors, planar layouts, strips/tiles, and both byte orders; a big-endian GDAL parity test for writer output; and synthetic sparse-block and video-range-YCbCr fuzz seeds

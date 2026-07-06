@@ -115,7 +115,7 @@ with `bands(...)` and optional
 - Strip and tile data access with windowed reads
 - Chunky and separate planar sample layouts
 - Full-raster and windowed single-band reads, optimized for separate-planar rasters
-- Compression: Deflate, LZW, PackBits, LERC, LERC+DEFLATE, JPEG (optional), ZSTD (optional), LERC+ZSTD (optional)
+- Compression: Deflate, LZW, PackBits, LERC, LERC+DEFLATE, JPEG (optional), ZSTD (optional), LERC+ZSTD (optional), WebP decode (optional)
 - Bounded IFD parsing and block decompression budgets for untrusted input
 - Parallel decompression via Rayon
 - Storage-domain typed sample reads via `read_image` / `read_window` / `read_band*`

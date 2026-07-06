@@ -25,11 +25,12 @@ lru = "0.16.3"
 parking_lot = "0.12"
 
 [features]
-default = ["rayon", "jpeg", "zstd"]
+default = ["rayon", "jpeg", "zstd", "webp"]
 f16 = ["tiff-core/f16"]
 rayon = ["dep:rayon"]
 jpeg = ["dep:jpeg-decoder"]
 zstd = ["dep:ruzstd"]
+webp = ["dep:image-webp"]
 
 [dependencies.rayon]
 version = "1"
@@ -41,4 +42,8 @@ optional = true
 
 [dependencies.ruzstd]
 version = "0.8.3"
+optional = true
+
+[dependencies.image-webp]
+version = "0.2"
 optional = true

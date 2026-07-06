@@ -44,6 +44,7 @@ pub enum Compression {
     DeflateOld,
     Lerc,
     Zstd,
+    WebP,
 }
 
 impl Compression {
@@ -58,6 +59,7 @@ impl Compression {
             32946 => Some(Self::DeflateOld),
             34887 => Some(Self::Lerc),
             50000 => Some(Self::Zstd),
+            50001 => Some(Self::WebP),
             _ => None,
         }
     }
@@ -73,6 +75,7 @@ impl Compression {
             Self::DeflateOld => 32946,
             Self::Lerc => 34887,
             Self::Zstd => 50000,
+            Self::WebP => 50001,
         }
     }
 
@@ -87,6 +90,7 @@ impl Compression {
             Self::DeflateOld => "DeflateOld",
             Self::Lerc => "LERC",
             Self::Zstd => "ZSTD",
+            Self::WebP => "WebP",
         }
     }
 }

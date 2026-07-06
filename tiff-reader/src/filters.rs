@@ -1,6 +1,6 @@
 //! Compression filter pipeline for TIFF strip/tile decompression.
 
-#[cfg(any(feature = "jpeg", feature = "zstd"))]
+#[cfg(any(feature = "jpeg", feature = "zstd", feature = "webp"))]
 use std::io::Cursor;
 use std::io::Read;
 #[cfg(feature = "jpeg")]
@@ -47,6 +47,10 @@ pub fn decompress(
         Some(Compression::Zstd) => decompress_zstd(data, index, decoded_len_limit),
         #[cfg(not(feature = "zstd"))]
         Some(Compression::Zstd) => Err(Error::UnsupportedCompression(compression)),
+        #[cfg(feature = "webp")]
+        Some(Compression::WebP) => decompress_webp(data, index, decoded_len_limit),
+        #[cfg(not(feature = "webp"))]
+        Some(Compression::WebP) => Err(Error::UnsupportedCompression(compression)),
         None => Err(Error::UnsupportedCompression(compression)),
     }
 }
@@ -277,6 +281,62 @@ fn decompress_zstd(data: &[u8], index: usize, decoded_len_limit: usize) -> Resul
         }
     })?;
     read_bounded_to_end(decoder, index, "ZSTD", decoded_len_limit)
+}
+
+#[cfg(feature = "webp")]
+fn decompress_webp(data: &[u8], index: usize, decoded_len_limit: usize) -> Result<Vec<u8>> {
+    let mut decoder = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        image_webp::WebPDecoder::new(Cursor::new(data))
+    }))
+    .map_err(|payload| Error::DecompressionFailed {
+        index,
+        reason: format!(
+            "WebP decoder panicked: {}",
+            webp_panic_payload_message(payload.as_ref())
+        ),
+    })?
+    .map_err(|error| Error::DecompressionFailed {
+        index,
+        reason: format!("WebP: {error}"),
+    })?;
+
+    let output_len = decoder
+        .output_buffer_size()
+        .ok_or_else(|| Error::DecompressionFailed {
+            index,
+            reason: "WebP output size overflows usize".into(),
+        })?;
+    if output_len > decoded_len_limit {
+        return Err(decoded_block_too_large(index, "WebP", decoded_len_limit));
+    }
+
+    let mut out = vec![0u8; output_len];
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        decoder.read_image(&mut out)
+    }))
+    .map_err(|payload| Error::DecompressionFailed {
+        index,
+        reason: format!(
+            "WebP decoder panicked: {}",
+            webp_panic_payload_message(payload.as_ref())
+        ),
+    })?
+    .map_err(|error| Error::DecompressionFailed {
+        index,
+        reason: format!("WebP: {error}"),
+    })?;
+    Ok(out)
+}
+
+#[cfg(feature = "webp")]
+fn webp_panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic payload".into()
+    }
 }
 
 fn read_bounded_to_end<R: Read>(
