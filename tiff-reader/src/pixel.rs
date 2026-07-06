@@ -212,7 +212,16 @@ pub(crate) fn decode_pixels(
             let reference_black_white = ifd
                 .reference_black_white()?
                 .unwrap_or_else(|| default_reference_black_white(storage_layout.bits_per_sample));
-            let chroma_denominator = bit_max(storage_layout.bits_per_sample) as f64;
+            let cb_scale = chroma_delta_scale(
+                storage_layout.bits_per_sample,
+                reference_black_white[2],
+                reference_black_white[3],
+            );
+            let cr_scale = chroma_delta_scale(
+                storage_layout.bits_per_sample,
+                reference_black_white[4],
+                reference_black_white[5],
+            );
             for pixel in 0..pixel_count {
                 let y = read_uint_sample(sample_bytes, storage_layout, pixel, 0) as f64;
                 let cb = read_uint_sample(sample_bytes, storage_layout, pixel, 1) as f64;
@@ -222,8 +231,8 @@ pub(crate) fn decode_pixels(
                     reference_black_white[0],
                     reference_black_white[1],
                 );
-                let cb_delta = (cb - reference_black_white[2]) / chroma_denominator;
-                let cr_delta = (cr - reference_black_white[4]) / chroma_denominator;
+                let cb_delta = (cb - reference_black_white[2]) * cb_scale;
+                let cr_delta = (cr - reference_black_white[4]) * cr_scale;
                 let r = clamp01(y_norm + 1.402 * cr_delta);
                 let g = clamp01(y_norm - 0.344_136_286 * cb_delta - 0.714_136_286 * cr_delta);
                 let b = clamp01(y_norm + 1.772 * cb_delta);
@@ -432,6 +441,22 @@ fn default_reference_black_white(bits_per_sample: u16) -> [f64; 6] {
     let max = bit_max(bits_per_sample) as f64;
     let chroma_zero = (1u128 << bits_per_sample.saturating_sub(1)) as f64;
     [0.0, max, chroma_zero, max, chroma_zero, max]
+}
+
+/// Normalized scale applied to a chroma code's offset from its zero reference.
+///
+/// TIFF 6.0 defines chroma decoding as
+/// `FullRangeValue = (code - ReferenceZero) * CodingRange / (ReferenceMax - ReferenceZero)`
+/// with a chroma coding range of `2^(bits-1) - 1` (127 for 8-bit samples).
+/// The result is normalized by the full sample range so it can be combined
+/// with the [0, 1]-normalized luma value.
+fn chroma_delta_scale(bits_per_sample: u16, reference_zero: f64, reference_max: f64) -> f64 {
+    let span = reference_max - reference_zero;
+    if span.abs() < f64::EPSILON {
+        return 0.0;
+    }
+    let coding_range = ((1u128 << bits_per_sample) / 2 - 1) as f64;
+    coding_range / (span * bit_max(bits_per_sample) as f64)
 }
 
 fn normalize_reference_sample(value: f64, black: f64, white: f64) -> f64 {
