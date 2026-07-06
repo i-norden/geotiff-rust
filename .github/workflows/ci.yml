@@ -82,6 +82,9 @@ jobs:
       - name: Test GeoTIFF reader with COG feature set (includes local)
         run: cargo test -p geotiff-reader --no-default-features --features cog --locked
 
+      - name: Test GeoTIFF reader with async COG feature set
+        run: cargo test -p geotiff-reader --no-default-features --features cog-async --locked
+
   corpus:
     name: Corpus sync
     runs-on: ubuntu-24.04

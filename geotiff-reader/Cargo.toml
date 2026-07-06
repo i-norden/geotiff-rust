@@ -26,6 +26,14 @@ f16 = ["local", "tiff-reader/f16"]
 local = ["dep:tiff-reader"]
 rayon = ["local", "tiff-reader/rayon"]
 cog = ["dep:reqwest", "dep:lru", "dep:parking_lot", "local", "rustls-tls"]
+cog-async = [
+    "dep:reqwest",
+    "dep:tokio",
+    "dep:lru",
+    "dep:parking_lot",
+    "local",
+    "rustls-tls",
+]
 rustls-tls = ["dep:reqwest", "reqwest/rustls-tls"]
 
 [dependencies.reqwest]
@@ -33,3 +41,13 @@ version = "0.12"
 default-features = false
 features = ["blocking"]
 optional = true
+
+[dependencies.tokio]
+version = "1"
+default-features = false
+features = ["rt"]
+optional = true
+
+[dev-dependencies.tokio]
+version = "1"
+features = ["macros", "rt-multi-thread"]

@@ -123,7 +123,7 @@ with `bands(...)` and optional
 - Structured photometric/color-model metadata: palette `ColorMap`, `ExtraSamples`, CMYK, and YCbCr
 - GeoKey directory, structured CRS metadata (projected, geographic, geocentric, vertical, compound), transforms, NoData
 - Overview discovery from both reduced-resolution top-level IFDs and recursive base-image SubIFD-backed overview trees
-- Optional HTTP range-backed remote COG access
+- Optional HTTP range-backed remote COG access, blocking (`cog`) or async Tokio-based (`cog-async`)
 
 **Write**
 - Classic TIFF and BigTIFF with auto-detection

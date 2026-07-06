@@ -17,6 +17,7 @@ use reqwest::StatusCode;
 use tiff_reader::source::{SharedSource, TiffSource};
 use tiff_reader::{OpenOptions as TiffOpenOptions, TiffFile};
 
+use crate::http_range::{probe_total_from_content_range, validate_content_range_header};
 use crate::{Error, GeoTiffFile, Result};
 
 /// Options for HTTP range-backed GeoTIFF access.
@@ -166,7 +167,16 @@ impl HttpRangeSource {
                 response.status()
             )));
         }
-        validate_response_content_range(&response, &self.url, start, end, Some(self.len))?;
+        validate_content_range_header(
+            response
+                .headers()
+                .get(CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok()),
+            &self.url,
+            start,
+            end,
+            Some(self.len),
+        )?;
         let expected_len = usize::try_from(end - start + 1).unwrap_or(usize::MAX);
         let body = read_response_body(
             response,
@@ -360,132 +370,20 @@ fn probe_content_length(
         .get(CONTENT_RANGE)
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| Error::Other(format!("missing Content-Range header for {url}")))?;
-    let content_range = parse_content_range(content_range).ok_or_else(|| {
-        Error::Other(format!(
-            "unable to parse object size from Content-Range: {content_range}"
-        ))
-    })?;
-    if content_range.start != 0 || content_range.end != 0 {
-        return Err(Error::Other(format!(
-            "unexpected Content-Range for {url}: expected bytes 0-0, got bytes {}-{}",
-            content_range.start, content_range.end
-        )));
-    }
-    content_range.total.ok_or_else(|| {
-        Error::Other(format!(
-            "missing object size in Content-Range for {url}: bytes {}-{}/{}",
-            content_range.start,
-            content_range.end,
-            content_range
-                .total
-                .map(|total| total.to_string())
-                .unwrap_or_else(|| "*".to_string())
-        ))
-    })
-}
-
-#[cfg(test)]
-fn parse_total_length(content_range: &str) -> Option<u64> {
-    parse_content_range(content_range)?.total
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ParsedContentRange {
-    start: u64,
-    end: u64,
-    total: Option<u64>,
-}
-
-fn parse_content_range(content_range: &str) -> Option<ParsedContentRange> {
-    let (unit, range_and_total) = content_range.trim().split_once(' ')?;
-    if !unit.eq_ignore_ascii_case("bytes") {
-        return None;
-    }
-    let (range, total) = range_and_total.split_once('/')?;
-    let (start, end) = range.split_once('-')?;
-    let start = start.parse().ok()?;
-    let end = end.parse().ok()?;
-    if start > end {
-        return None;
-    }
-    let total = if total == "*" {
-        None
-    } else {
-        let total = total.parse().ok()?;
-        if end >= total {
-            return None;
-        }
-        Some(total)
-    };
-    Some(ParsedContentRange { start, end, total })
-}
-
-fn validate_response_content_range(
-    response: &reqwest::blocking::Response,
-    url: &str,
-    expected_start: u64,
-    expected_end: u64,
-    expected_total: Option<u64>,
-) -> Result<()> {
-    let content_range = response
-        .headers()
-        .get(CONTENT_RANGE)
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| Error::Other(format!("missing Content-Range header for {url}")))?;
-    let parsed = parse_content_range(content_range).ok_or_else(|| {
-        Error::Other(format!(
-            "unable to parse Content-Range for {url}: {content_range}"
-        ))
-    })?;
-    if parsed.start != expected_start || parsed.end != expected_end {
-        return Err(Error::Other(format!(
-            "unexpected Content-Range for {url}: expected bytes {expected_start}-{expected_end}, got bytes {}-{}",
-            parsed.start, parsed.end
-        )));
-    }
-    if let (Some(actual_total), Some(expected_total)) = (parsed.total, expected_total) {
-        if actual_total != expected_total {
-            return Err(Error::Other(format!(
-                "unexpected Content-Range total for {url}: expected {expected_total}, got {actual_total}"
-            )));
-        }
-    }
-    Ok(())
+    probe_total_from_content_range(content_range, url)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
-    use std::net::{SocketAddr, TcpListener};
     use std::path::Path;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
-    use std::thread;
     use std::time::Duration;
 
     use reqwest::blocking::Client;
     use reqwest::header::{HeaderMap, HeaderValue};
     use tiff_reader::source::TiffSource;
 
-    use super::{
-        parse_content_range, parse_total_length, HttpGeoTiffFile, HttpOpenOptions, HttpRangeSource,
-    };
-
-    #[test]
-    fn parses_total_length_from_content_range() {
-        assert_eq!(parse_total_length("bytes 0-0/12345"), Some(12345));
-    }
-
-    #[test]
-    fn parses_content_range_start_end_and_total() {
-        let parsed = parse_content_range("bytes 12-34/100").unwrap();
-
-        assert_eq!(parsed.start, 12);
-        assert_eq!(parsed.end, 34);
-        assert_eq!(parsed.total, Some(100));
-        assert_eq!(parse_content_range("bytes 34-12/100"), None);
-        assert_eq!(parse_content_range("items 12-34/100"), None);
-    }
+    use super::{HttpGeoTiffFile, HttpOpenOptions, HttpRangeSource};
+    use crate::http_test_support::{build_simple_geotiff, TestServer};
 
     #[test]
     fn default_http_options_set_request_timeouts() {
@@ -677,235 +575,9 @@ mod tests {
         assert_eq!(source.cache.lock().current_bytes, 0);
     }
 
-    fn build_simple_geotiff() -> Vec<u8> {
-        fn le_u16(value: u16) -> [u8; 2] {
-            value.to_le_bytes()
-        }
-        fn le_u32(value: u32) -> [u8; 4] {
-            value.to_le_bytes()
-        }
-        fn le_f64(value: f64) -> [u8; 8] {
-            value.to_le_bytes()
-        }
-
-        let image_data = vec![10u8, 20, 30, 40];
-        let tiepoints = [0.0, 0.0, 0.0, 100.0, 200.0, 0.0];
-        let scales = [2.0, 2.0, 0.0];
-        let geo_keys: [u16; 12] = [1, 1, 0, 2, 1024, 0, 1, 2, 2048, 0, 1, 4326];
-        let nodata = b"-9999\0".to_vec();
-
-        let entries = vec![
-            (256u16, 4u16, 1u32, le_u32(2).to_vec()),
-            (257u16, 4u16, 1u32, le_u32(2).to_vec()),
-            (258u16, 3u16, 1u32, [8, 0, 0, 0].to_vec()),
-            (259u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
-            (273u16, 4u16, 1u32, vec![]),
-            (277u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
-            (278u16, 4u16, 1u32, le_u32(2).to_vec()),
-            (279u16, 4u16, 1u32, le_u32(image_data.len() as u32).to_vec()),
-            (
-                33550u16,
-                12u16,
-                3u32,
-                scales.iter().flat_map(|value| le_f64(*value)).collect(),
-            ),
-            (
-                33922u16,
-                12u16,
-                6u32,
-                tiepoints.iter().flat_map(|value| le_f64(*value)).collect(),
-            ),
-            (
-                34735u16,
-                3u16,
-                geo_keys.len() as u32,
-                geo_keys.iter().flat_map(|value| le_u16(*value)).collect(),
-            ),
-            (42113u16, 2u16, nodata.len() as u32, nodata),
-        ];
-
-        let ifd_offset = 8u32;
-        let ifd_size = 2 + entries.len() * 12 + 4;
-        let mut next_data_offset = ifd_offset as usize + ifd_size;
-        let image_offset = next_data_offset as u32;
-        next_data_offset += image_data.len();
-
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"II");
-        bytes.extend_from_slice(&le_u16(42));
-        bytes.extend_from_slice(&le_u32(ifd_offset));
-        bytes.extend_from_slice(&le_u16(entries.len() as u16));
-
-        let mut deferred = Vec::new();
-        for (tag, ty, count, value) in entries {
-            bytes.extend_from_slice(&le_u16(tag));
-            bytes.extend_from_slice(&le_u16(ty));
-            bytes.extend_from_slice(&le_u32(count));
-            if tag == 273 {
-                bytes.extend_from_slice(&le_u32(image_offset));
-            } else if value.len() <= 4 {
-                let mut inline = [0u8; 4];
-                inline[..value.len()].copy_from_slice(&value);
-                bytes.extend_from_slice(&inline);
-            } else {
-                bytes.extend_from_slice(&le_u32(next_data_offset as u32));
-                next_data_offset += value.len();
-                deferred.push(value);
-            }
-        }
-        bytes.extend_from_slice(&le_u32(0));
-        bytes.extend_from_slice(&image_data);
-        for value in deferred {
-            bytes.extend_from_slice(&value);
-        }
-        bytes
-    }
-
     fn real_cog_fixture() -> Option<Vec<u8>> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../testdata/interoperability/gdal/gcore/data/cog/byte_little_endian_golden.tif");
         std::fs::read(path).ok()
-    }
-
-    type RequestedRange = (usize, usize);
-    type ParsedRequest = (String, Option<RequestedRange>, String);
-
-    struct TestServer {
-        addr: SocketAddr,
-        stop: Arc<AtomicBool>,
-        requests: Arc<Mutex<Vec<String>>>,
-        handle: Option<thread::JoinHandle<()>>,
-    }
-
-    impl TestServer {
-        fn start(bytes: Vec<u8>) -> Option<Self> {
-            Self::start_with_content_range_offset(bytes, 0)
-        }
-
-        fn start_with_content_range_offset(
-            bytes: Vec<u8>,
-            content_range_offset: usize,
-        ) -> Option<Self> {
-            let listener = TcpListener::bind("127.0.0.1:0").ok()?;
-            listener.set_nonblocking(true).ok()?;
-            let addr = listener.local_addr().ok()?;
-            let stop = Arc::new(AtomicBool::new(false));
-            let stop_flag = stop.clone();
-            let requests = Arc::new(Mutex::new(Vec::new()));
-            let requests_worker = requests.clone();
-
-            let handle = thread::spawn(move || {
-                while !stop_flag.load(Ordering::Relaxed) {
-                    match listener.accept() {
-                        Ok((mut stream, _)) => {
-                            let Some((request_line, range, request)) = read_request(&mut stream)
-                            else {
-                                continue;
-                            };
-                            requests_worker.lock().unwrap().push(request);
-
-                            if request_line.starts_with("HEAD ") {
-                                let response = format!(
-                                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
-                                    bytes.len()
-                                );
-                                let _ = stream.write_all(response.as_bytes());
-                                continue;
-                            }
-
-                            if let Some((start, end)) = range {
-                                let body = &bytes[start..=end];
-                                let reported_start = start.saturating_add(content_range_offset);
-                                let reported_end = end.saturating_add(content_range_offset);
-                                let response = format!(
-                                    "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
-                                    body.len(),
-                                    reported_start,
-                                    reported_end,
-                                    bytes.len()
-                                );
-                                let _ = stream.write_all(response.as_bytes());
-                                let _ = stream.write_all(body);
-                            } else {
-                                let response = format!(
-                                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
-                                    bytes.len()
-                                );
-                                let _ = stream.write_all(response.as_bytes());
-                                let _ = stream.write_all(&bytes);
-                            }
-                        }
-                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(10));
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-
-            Some(Self {
-                addr,
-                stop,
-                requests,
-                handle: Some(handle),
-            })
-        }
-
-        fn url(&self) -> String {
-            format!("http://{}", self.addr)
-        }
-
-        fn requests(&self) -> Vec<String> {
-            self.requests.lock().unwrap().clone()
-        }
-    }
-
-    fn read_request(stream: &mut std::net::TcpStream) -> Option<ParsedRequest> {
-        let mut request = Vec::with_capacity(1024);
-        let mut chunk = [0u8; 1024];
-
-        loop {
-            let read = stream.read(&mut chunk).ok()?;
-            if read == 0 {
-                return None;
-            }
-            request.extend_from_slice(&chunk[..read]);
-            if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                break;
-            }
-            if request.len() >= 16 * 1024 {
-                return None;
-            }
-        }
-
-        let request = String::from_utf8_lossy(&request).into_owned();
-        let mut lines = request.lines();
-        let request_line = lines.next()?.to_string();
-        let mut range = None;
-        for line in lines {
-            let lower = line.to_ascii_lowercase();
-            if let Some(value) = lower.strip_prefix("range: bytes=") {
-                let (start_s, end_s) = value.trim().split_once('-')?;
-                let start = start_s.parse().ok()?;
-                let end = end_s.parse().ok()?;
-                if start > end {
-                    return None;
-                }
-                range = Some((start, end));
-                break;
-            }
-        }
-
-        Some((request_line, range, request))
-    }
-
-    impl Drop for TestServer {
-        fn drop(&mut self) {
-            self.stop.store(true, Ordering::Relaxed);
-            let _ = std::net::TcpStream::connect(self.addr);
-            if let Some(handle) = self.handle.take() {
-                let _ = handle.join();
-            }
-        }
     }
 }
