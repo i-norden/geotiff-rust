@@ -97,6 +97,7 @@ struct CogBlockEncoding {
     block_height: u32,
     lerc_options: Option<LercOptions>,
     jpeg_options: Option<JpegOptions>,
+    deflate_level: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -108,6 +109,7 @@ struct TileWritePlan {
     predictor: Predictor,
     lerc_options: Option<LercOptions>,
     jpeg_options: Option<JpegOptions>,
+    deflate_level: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -525,6 +527,7 @@ fn compress_cog_block<T: NumericSample>(
                 samples_per_pixel: encoding.samples_per_pixel,
                 row_width_pixels: encoding.row_width_pixels,
                 jpeg_options: encoding.jpeg_options.as_ref(),
+                deflate_level: encoding.deflate_level,
             },
             block_index,
         )
@@ -1034,6 +1037,7 @@ impl CogBuilder {
             predictor: self.inner.predictor,
             lerc_options: self.inner.lerc_options,
             jpeg_options: self.inner.jpeg_options,
+            deflate_level: self.inner.deflate_level,
         };
         let grid = RawTileGrid {
             tile_width: tw,
@@ -1115,6 +1119,7 @@ pub struct CogTileWriter<T: NumericSample, W: Write + Seek> {
     predictor: Predictor,
     lerc_options: Option<LercOptions>,
     jpeg_options: Option<JpegOptions>,
+    deflate_level: Option<u32>,
     overview_levels: Vec<u32>,
     resampling: Resampling,
     fill_value: T,
@@ -1159,6 +1164,7 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             predictor: cog.inner.predictor,
             lerc_options: cog.inner.lerc_options,
             jpeg_options: cog.inner.jpeg_options,
+            deflate_level: cog.inner.deflate_level,
             overview_levels,
             resampling: cog.resampling,
             fill_value,
@@ -1347,6 +1353,7 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             predictor: self.predictor,
             lerc_options: self.lerc_options,
             jpeg_options: self.jpeg_options,
+            deflate_level: self.deflate_level,
         };
         let grid = RawTileGrid {
             tile_width: tw,
@@ -1614,6 +1621,7 @@ where
                             block_height: plan.tile_height as u32,
                             lerc_options: plan.lerc_options,
                             jpeg_options: plan.jpeg_options,
+                            deflate_level: plan.deflate_level,
                         },
                     )?;
                 }
@@ -1637,6 +1645,7 @@ where
                         block_height: plan.tile_height as u32,
                         lerc_options: plan.lerc_options,
                         jpeg_options: plan.jpeg_options,
+                        deflate_level: plan.deflate_level,
                     },
                 )?;
             }
@@ -1698,6 +1707,7 @@ fn spool_base_blocks_from_store<T: NumericSample>(
                             block_height: plan.tile_height as u32,
                             lerc_options: plan.lerc_options,
                             jpeg_options: plan.jpeg_options,
+                            deflate_level: plan.deflate_level,
                         },
                     )?;
                 }
@@ -1725,6 +1735,7 @@ fn spool_base_blocks_from_store<T: NumericSample>(
                         block_height: plan.tile_height as u32,
                         lerc_options: plan.lerc_options,
                         jpeg_options: plan.jpeg_options,
+                        deflate_level: plan.deflate_level,
                     },
                 )?;
             }
@@ -1800,6 +1811,7 @@ fn spool_tiled_data_3d<T: NumericSample>(
                             block_height: th as u32,
                             lerc_options: plan.lerc_options,
                             jpeg_options: plan.jpeg_options,
+                            deflate_level: plan.deflate_level,
                         },
                     )?;
                 }
@@ -1835,6 +1847,7 @@ fn spool_tiled_data_3d<T: NumericSample>(
                         block_height: th as u32,
                         lerc_options: plan.lerc_options,
                         jpeg_options: plan.jpeg_options,
+                        deflate_level: plan.deflate_level,
                     },
                 )?;
             }
