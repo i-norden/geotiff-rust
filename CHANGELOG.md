@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- pad one-shot COG edge tiles with the configured nodata fill value instead of zero, matching the streaming tile writer and overview generation paths
 - reject writer configurations that pair the horizontal predictor with float samples, the floating-point predictor with integer samples, or float sample formats below 32 bits, instead of emitting files other readers refuse
 - decode `BitsPerSample`/`SampleFormat` tags stored with nonstandard BYTE or LONG encodings instead of silently falling back to 1-bit defaults, and reject other unexpected tag types via new `Ifd::checked_bits_per_sample` / `Ifd::checked_sample_format` used by all decode paths
 - round integer overview resampling to the nearest value instead of truncating toward zero, and reject GeoTIFF/COG nodata strings that are out of range or fractional for the raster sample type instead of silently saturating the fill value

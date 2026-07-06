@@ -696,3 +696,29 @@ fn average_overview_rounds_to_nearest_integer() {
     // (1 + 2 + 2 + 2) / 4 = 1.75 rounds to 2 rather than truncating to 1.
     assert_eq!(overview[[0, 0]], 2);
 }
+
+#[test]
+fn cog_edge_tiles_pad_with_nodata_fill() {
+    let data = Array2::<i16>::from_shape_vec((2, 2), vec![10, 20, 30, 40]).unwrap();
+    let mut buf = Cursor::new(Vec::new());
+    CogBuilder::new(GeoTiffBuilder::new(2, 2).tile_size(16, 16).nodata("-1"))
+        .no_overviews()
+        .write_2d_to(&mut buf, data.view())
+        .unwrap();
+
+    let tiff = TiffFile::from_bytes(buf.into_inner()).unwrap();
+    let ifd = tiff.ifd(0).unwrap();
+    let offset = ifd.tile_offsets().unwrap()[0] as usize;
+    let byte_count = ifd.tile_byte_counts().unwrap()[0] as usize;
+    assert_eq!(byte_count, 16 * 16 * 2);
+
+    let raw = &tiff.raw_bytes().unwrap()[offset..offset + byte_count];
+    let samples: Vec<i16> = raw
+        .chunks_exact(2)
+        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect();
+    assert_eq!(&samples[..4], &[10, 20, -1, -1]);
+    assert_eq!(samples[16], 30);
+    assert_eq!(samples[17], 40);
+    assert!(samples[18..].iter().all(|&value| value == -1));
+}
