@@ -14,6 +14,7 @@ Breaking changes:
 Other changes:
 
 - add optional `f16` features to the TIFF and GeoTIFF readers/writers, enabling `half::f16` rasters encoded as `SampleFormat=Float` with 16 bits per sample
+- add a property-based writer→reader roundtrip suite covering sample types, compressions, predictors, planar layouts, strips/tiles, and both byte orders; a big-endian GDAL parity test for writer output; and synthetic sparse-block and video-range-YCbCr fuzz seeds
 - restructure the GDAL ghost-area block reader into explicit wrapped/direct phases with a candidate-outcome test matrix, and move SubIFD tag-offset math into `tiff_writer::encoder::find_tag_value_offset`
 - add `deflate_level(0..=9)` to `ImageBuilder` and `GeoTiffBuilder` for controlling Deflate output size/speed, plus `compress_with_level` in `tiff-writer::compress`; `BlockEncodingOptions` gains a `deflate_level` field
 - speed up decode and write paths: switch the Deflate backend to the pure-Rust `zlib-rs` (~20-40% faster on predictor-compressed rasters), stream overview resampling by source row spans (~6x faster streaming COG average overviews), copy raster regions by row slice instead of per-element indexing (~4.5x faster plain multiband writes), resolve per-block decode metadata once per read, encode writer tag values once, and reuse the floating-point predictor scratch buffer across rows

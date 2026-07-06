@@ -36,6 +36,7 @@ struct TiffDumpExpectation {
 enum SampleKind {
     U8,
     I8,
+    U16,
 }
 
 fn fixture(path: &str) -> std::path::PathBuf {
@@ -174,6 +175,16 @@ fn assert_gdal_hash_matches(path: &std::path::Path, ifd_index: usize, sample_kin
                 "pixel hash mismatch for {path_str}"
             );
         }
+        SampleKind::U16 => {
+            let raster: ArrayD<u16> = file.read_decoded_image(ifd_index).unwrap();
+            assert_shape(&raster, width as u32, height as u32, band_count);
+            let (actual_len, actual_hash) = reference::array_hash(&raster);
+            assert_eq!(actual_len, byte_len, "byte length mismatch for {path_str}");
+            assert_eq!(
+                actual_hash, expected_hash,
+                "pixel hash mismatch for {path_str}"
+            );
+        }
     }
 }
 
@@ -242,6 +253,37 @@ fn write_generated_planar_fixture(path: &std::path::Path) {
             .unwrap();
     }
 
+    tiff_writer.finish().unwrap();
+}
+
+fn write_generated_big_endian_fixture(path: &std::path::Path) {
+    let width = 20u32;
+    let height = 20u32;
+
+    let file = File::create(path).unwrap();
+    let writer = BufWriter::new(file);
+    let mut tiff_writer = TiffWriter::new(
+        writer,
+        WriteOptions {
+            byte_order: tiff_core::ByteOrder::BigEndian,
+            variant: tiff_writer::TiffVariant::Classic,
+        },
+    )
+    .unwrap();
+    let image = ImageBuilder::new(width, height)
+        .sample_type::<u16>()
+        .compression(Compression::Deflate)
+        .predictor(tiff_core::Predictor::Horizontal)
+        .strips(7);
+    let block_count = image.checked_block_count().unwrap();
+    let handle = tiff_writer.add_image(image).unwrap();
+    for block in 0..block_count {
+        let rows = 7usize.min(height as usize - block * 7);
+        let samples: Vec<u16> = (0..rows * width as usize)
+            .map(|offset| ((block * 5039 + offset * 97) % 60_000) as u16)
+            .collect();
+        tiff_writer.write_block(&handle, block, &samples).unwrap();
+    }
     tiff_writer.finish().unwrap();
 }
 
@@ -412,6 +454,20 @@ fn matches_reference_tools_for_generated_planar_tiff() {
     assert_eq!(ifd.tile_height(), directory.tile_height);
 
     assert_gdal_hash_matches(fixture.path(), 0, SampleKind::U8);
+}
+
+#[test]
+fn matches_gdal_for_generated_big_endian_tiff() {
+    if !reference::python_gdal_available() {
+        eprintln!(
+            "skipping GDAL big-endian parity test because Python GDAL bindings are unavailable"
+        );
+        return;
+    }
+
+    let fixture = NamedTempFile::new().unwrap();
+    write_generated_big_endian_fixture(fixture.path());
+    assert_gdal_hash_matches(fixture.path(), 0, SampleKind::U16);
 }
 
 #[test]
