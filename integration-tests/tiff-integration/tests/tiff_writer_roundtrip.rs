@@ -361,7 +361,7 @@ fn palette_rgba_cmyk_and_ycbcr_metadata_roundtrip() {
             3, 252, 1, 64
         ]
     );
-    let palette_samples = palette_file.read_image_samples::<u8>(0).unwrap();
+    let palette_samples = palette_file.read_image::<u8>(0).unwrap();
     let (palette_sample_values, palette_sample_offset) = palette_samples.into_raw_vec_and_offset();
     assert_eq!(palette_sample_offset, Some(0));
     assert_eq!(palette_sample_values, vec![0, 255, 1, 192, 2, 128, 3, 64]);
@@ -452,7 +452,7 @@ fn palette_rgba_cmyk_and_ycbcr_metadata_roundtrip() {
     let (ycbcr_values, ycbcr_offset) = ycbcr_image.into_raw_vec_and_offset();
     assert_eq!(ycbcr_offset, Some(0));
     assert_eq!(ycbcr_values, vec![16, 16, 16, 255, 133, 133]);
-    let ycbcr_samples = ycbcr_file.read_image_samples::<u8>(0).unwrap();
+    let ycbcr_samples = ycbcr_file.read_image::<u8>(0).unwrap();
     let (ycbcr_sample_values, ycbcr_sample_offset) = ycbcr_samples.into_raw_vec_and_offset();
     assert_eq!(ycbcr_sample_offset, Some(0));
     assert_eq!(ycbcr_sample_values, vec![16, 128, 128, 200, 90, 240]);

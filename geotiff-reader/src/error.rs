@@ -21,23 +21,11 @@ pub enum Error {
     #[error("invalid GeoKey directory")]
     InvalidGeoKeyDirectory,
 
-    #[error("unsupported GeoKey model type: {0}")]
-    UnsupportedModelType(u16),
-
-    #[error("EPSG code {0} not recognized")]
-    UnknownEpsg(u32),
-
     #[error("overview index {0} not found")]
     OverviewNotFound(usize),
 
     #[error("overview index {0} is stored in a SubIFD and has no top-level TIFF IFD index")]
     OverviewHasNoTopLevelIfdIndex(usize),
-
-    #[error("band index {0} is out of bounds")]
-    BandOutOfBounds(usize),
-
-    #[error("no pixel scale or transformation matrix found")]
-    NoGeoTransform,
 
     #[error("{0}")]
     Other(String),

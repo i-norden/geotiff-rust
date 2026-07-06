@@ -364,10 +364,8 @@ version = "0.7.0"
 dependencies = [
  "geotiff-core",
  "lru",
- "memmap2",
  "ndarray",
  "parking_lot",
- "rayon",
  "reqwest",
  "thiserror",
  "tiff-reader",
@@ -1509,7 +1507,6 @@ dependencies = [
  "parking_lot",
  "rayon",
  "ruzstd",
- "smallvec",
  "thiserror",
  "tiff-core",
  "weezl",

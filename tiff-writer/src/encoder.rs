@@ -399,6 +399,41 @@ pub fn build_image_tags(p: &ImageTagParams<'_>) -> Vec<Tag> {
     tags
 }
 
+/// Find where a tag's value is stored within a written IFD: the inline
+/// value field for values that fit, or the deferred data area otherwise.
+///
+/// Assumes the IFD was produced by [`write_ifd`] with the same tag list.
+pub fn find_tag_value_offset(
+    ifd_offset: u64,
+    is_bigtiff: bool,
+    tags: &[Tag],
+    target_code: u16,
+) -> Option<u64> {
+    let entry_size: u64 = if is_bigtiff { 20 } else { 12 };
+    let inline_max: usize = if is_bigtiff { 8 } else { 4 };
+    let next_ptr_size: u64 = if is_bigtiff { 8 } else { 4 };
+    let count_size: u64 = if is_bigtiff { 8 } else { 2 };
+    let value_field_offset: u64 = if is_bigtiff { 12 } else { 8 };
+    let mut deferred_offset =
+        ifd_offset + count_size + tags.len() as u64 * entry_size + next_ptr_size;
+
+    for (index, tag) in tags.iter().enumerate() {
+        let encoded_len = tag.value.encoded_len();
+        if tag.code == target_code {
+            return if encoded_len <= inline_max {
+                Some(ifd_offset + count_size + index as u64 * entry_size + value_field_offset)
+            } else {
+                Some(deferred_offset)
+            };
+        }
+        if encoded_len > inline_max {
+            deferred_offset += encoded_len as u64;
+        }
+    }
+
+    None
+}
+
 /// Find the position of a tag's inline value within a written IFD.
 pub fn find_inline_tag_value_offset(
     ifd_offset: u64,

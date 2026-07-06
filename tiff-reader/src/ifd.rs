@@ -129,22 +129,13 @@ impl Ifd {
         self.tag_u32(TAG_IMAGE_LENGTH).unwrap_or(0)
     }
 
-    /// Bits per sample for each channel.
-    ///
-    /// This best-effort accessor falls back to the spec default when the tag
-    /// carries an unexpected type. Use [`Self::checked_bits_per_sample`] to
-    /// surface malformed tags as errors; all decode paths do.
-    pub fn bits_per_sample(&self) -> Vec<u16> {
-        self.checked_bits_per_sample().unwrap_or_else(|_| vec![1])
-    }
-
     /// Bits per sample for each channel, validating the tag encoding.
     ///
     /// A missing tag defaults to `1` per the TIFF specification. SHORT
     /// values are used directly; BYTE and LONG values written by
     /// nonconforming writers are coerced when they fit. Any other tag type
     /// is rejected instead of silently falling back to the default.
-    pub fn checked_bits_per_sample(&self) -> Result<Vec<u16>> {
+    pub fn bits_per_sample(&self) -> Result<Vec<u16>> {
         self.checked_tag_u16_values(TAG_BITS_PER_SAMPLE)
     }
 
@@ -185,20 +176,9 @@ impl Ifd {
     }
 
     /// Rows per strip. Defaults to the image height when not present.
-    pub fn rows_per_strip(&self) -> Option<u32> {
-        Some(
-            self.tag_u32(TAG_ROWS_PER_STRIP)
-                .unwrap_or_else(|| self.height()),
-        )
-    }
-
-    /// Sample format for each channel.
-    ///
-    /// This best-effort accessor falls back to the spec default when the tag
-    /// carries an unexpected type. Use [`Self::checked_sample_format`] to
-    /// surface malformed tags as errors; all decode paths do.
-    pub fn sample_format(&self) -> Vec<u16> {
-        self.checked_sample_format().unwrap_or_else(|_| vec![1])
+    pub fn rows_per_strip(&self) -> u32 {
+        self.tag_u32(TAG_ROWS_PER_STRIP)
+            .unwrap_or_else(|| self.height())
     }
 
     /// Sample format for each channel, validating the tag encoding.
@@ -207,7 +187,7 @@ impl Ifd {
     /// specification. SHORT values are used directly; BYTE and LONG values
     /// written by nonconforming writers are coerced when they fit. Any other
     /// tag type is rejected instead of silently falling back to the default.
-    pub fn checked_sample_format(&self) -> Result<Vec<u16>> {
+    pub fn sample_format(&self) -> Result<Vec<u16>> {
         self.checked_tag_u16_values(TAG_SAMPLE_FORMAT)
     }
 
@@ -526,13 +506,13 @@ impl Ifd {
 
         let bits = normalize_u16_values(
             TAG_BITS_PER_SAMPLE,
-            self.checked_bits_per_sample()?,
+            self.bits_per_sample()?,
             samples_per_pixel,
             1,
         )?;
         let formats = normalize_u16_values(
             TAG_SAMPLE_FORMAT,
-            self.checked_sample_format()?,
+            self.sample_format()?,
             samples_per_pixel,
             1,
         )?;

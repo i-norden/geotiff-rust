@@ -308,7 +308,7 @@ fn collect_strip_specs_for_window(
         )));
     }
 
-    let rows_per_strip = ifd.rows_per_strip().unwrap_or(ifd.height());
+    let rows_per_strip = ifd.rows_per_strip();
     if rows_per_strip == 0 {
         return Err(Error::InvalidImageLayout(
             "RowsPerStrip must be greater than zero".into(),

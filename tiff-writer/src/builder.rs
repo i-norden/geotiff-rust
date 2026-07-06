@@ -204,6 +204,11 @@ impl ImageBuilder {
         self
     }
 
+    /// The configured strip/tile data layout.
+    pub fn data_layout(&self) -> DataLayout {
+        self.layout
+    }
+
     /// Configure tile-based layout.
     pub fn tiles(mut self, tile_width: u32, tile_height: u32) -> Self {
         self.layout = DataLayout::Tiles {
@@ -252,24 +257,6 @@ impl ImageBuilder {
         self
     }
 
-    /// Total number of blocks (strips or tiles) for this image configuration.
-    ///
-    /// This legacy infallible helper is best-effort for invalid configurations.
-    /// Use [`Self::checked_block_count`] when invalid layouts should be reported
-    /// as errors.
-    #[deprecated(
-        since = "0.6.0",
-        note = "use ImageBuilder::checked_block_count() to handle invalid layouts without best-effort fallback"
-    )]
-    pub fn block_count(&self) -> usize {
-        let blocks_per_plane = self.legacy_blocks_per_plane();
-        if matches!(self.planar_configuration, PlanarConfiguration::Planar) {
-            blocks_per_plane.saturating_mul(self.samples_per_pixel as usize)
-        } else {
-            blocks_per_plane
-        }
-    }
-
     /// Checked total number of blocks (strips or tiles) for this image configuration.
     pub fn checked_block_count(&self) -> crate::error::Result<usize> {
         let blocks_per_plane = match self.checked_layout()? {
@@ -293,39 +280,6 @@ impl ImageBuilder {
                 .ok_or_else(|| layout_overflow("planar block count"))
         } else {
             Ok(blocks_per_plane)
-        }
-    }
-
-    /// Expected number of samples for the block at `index`.
-    ///
-    /// This legacy infallible helper is best-effort for invalid configurations.
-    /// Use [`Self::checked_block_sample_count`] when invalid layouts should be
-    /// reported as errors.
-    #[deprecated(
-        since = "0.6.0",
-        note = "use ImageBuilder::checked_block_sample_count() to handle invalid layouts without best-effort fallback"
-    )]
-    pub fn block_sample_count(&self, index: usize) -> usize {
-        let samples_per_pixel = self.block_samples_per_pixel() as usize;
-        let plane_block_index = self.block_plane_index(index);
-        match self.layout {
-            DataLayout::Strips { rows_per_strip } => {
-                let rps = rows_per_strip.max(1) as usize;
-                let start_row = plane_block_index.saturating_mul(rps);
-                let end_row = plane_block_index
-                    .saturating_add(1)
-                    .saturating_mul(rps)
-                    .min(self.height as usize);
-                let rows = end_row.saturating_sub(start_row);
-                rows.saturating_mul(self.width as usize)
-                    .saturating_mul(samples_per_pixel)
-            }
-            DataLayout::Tiles { width, height } => {
-                // Tiles are always full-sized (padded at edges).
-                (width.max(1) as usize)
-                    .saturating_mul(height.max(1) as usize)
-                    .saturating_mul(samples_per_pixel)
-            }
         }
     }
 
@@ -359,23 +313,6 @@ impl ImageBuilder {
         }
     }
 
-    /// Estimated uncompressed image bytes.
-    ///
-    /// This legacy infallible helper saturates on overflow. Use
-    /// [`Self::checked_estimated_uncompressed_bytes`] when invalid layouts should
-    /// be reported as errors.
-    #[deprecated(
-        since = "0.6.0",
-        note = "use ImageBuilder::checked_estimated_uncompressed_bytes() to handle overflow without saturation"
-    )]
-    pub fn estimated_uncompressed_bytes(&self) -> u64 {
-        let bps = (self.bits_per_sample / 8).max(1) as u64;
-        (self.width as u64)
-            .saturating_mul(self.height as u64)
-            .saturating_mul(self.samples_per_pixel as u64)
-            .saturating_mul(bps)
-    }
-
     /// Checked estimated uncompressed image bytes.
     pub fn checked_estimated_uncompressed_bytes(&self) -> crate::error::Result<u64> {
         let bps = (self.bits_per_sample / 8).max(1) as u64;
@@ -394,19 +331,6 @@ impl ImageBuilder {
         }
     }
 
-    /// Build the layout-specific tags (RowsPerStrip or TileWidth/TileLength).
-    ///
-    /// This legacy infallible helper preserves the configured tag values even
-    /// when the layout is invalid. Use [`Self::checked_layout_tags`] when invalid
-    /// layouts should be reported as errors.
-    #[deprecated(
-        since = "0.6.0",
-        note = "use ImageBuilder::checked_layout_tags() to handle invalid layouts without best-effort fallback"
-    )]
-    pub fn layout_tags(&self) -> Vec<Tag> {
-        self.legacy_layout_tags()
-    }
-
     /// Checked build of the layout-specific tags.
     pub fn checked_layout_tags(&self) -> crate::error::Result<Vec<Tag>> {
         match self.checked_layout()? {
@@ -419,80 +343,6 @@ impl ImageBuilder {
                 Tag::new(TAG_TILE_LENGTH, TagValue::Long(vec![height])),
             ]),
         }
-    }
-
-    /// Build the serialized TIFF tags for this image definition.
-    ///
-    /// This legacy infallible helper is best-effort for invalid configurations.
-    /// Use [`Self::checked_build_tags`] when invalid layouts and color models
-    /// should be reported as errors.
-    #[deprecated(
-        since = "0.6.0",
-        note = "use ImageBuilder::checked_build_tags() to handle invalid layouts and color models without best-effort fallback"
-    )]
-    pub fn build_tags(&self, is_bigtiff: bool) -> Vec<Tag> {
-        let mut extra_tags = self.extra_tags.clone();
-        if let Some(lerc_tag) = self.lerc_parameters_tag() {
-            extra_tags.push(lerc_tag);
-        }
-        if let Ok(extra_samples) = self.effective_extra_samples() {
-            if !extra_samples.is_empty() {
-                extra_tags.push(Tag::new(
-                    TAG_EXTRA_SAMPLES,
-                    TagValue::Short(
-                        extra_samples
-                            .iter()
-                            .copied()
-                            .map(ExtraSample::to_code)
-                            .collect(),
-                    ),
-                ));
-            }
-        }
-        if let Some(color_map) = &self.color_map {
-            extra_tags.push(Tag::new(
-                TAG_COLOR_MAP,
-                TagValue::Short(color_map.encode_tag_values()),
-            ));
-        }
-        if let Some(ink_set) = self.ink_set {
-            extra_tags.push(Tag::new(
-                TAG_INK_SET,
-                TagValue::Short(vec![ink_set.to_code()]),
-            ));
-        }
-        if let Some([h, v]) = self.ycbcr_subsampling {
-            extra_tags.push(Tag::new(TAG_YCBCR_SUBSAMPLING, TagValue::Short(vec![h, v])));
-        }
-        if let Some(positioning) = self.ycbcr_positioning {
-            extra_tags.push(Tag::new(
-                TAG_YCBCR_POSITIONING,
-                TagValue::Short(vec![positioning.to_code()]),
-            ));
-        }
-
-        let (offsets_tag_code, byte_counts_tag_code) = self.offset_tag_codes();
-        let layout_tags = self.legacy_layout_tags();
-        let num_blocks = self.checked_block_count().unwrap_or(0);
-
-        encoder::build_image_tags(&encoder::ImageTagParams {
-            width: self.width,
-            height: self.height,
-            samples_per_pixel: self.samples_per_pixel,
-            bits_per_sample: self.bits_per_sample,
-            sample_format: self.sample_format.to_code(),
-            compression: self.compression.to_code(),
-            photometric: self.photometric.to_code(),
-            predictor: self.predictor.to_code(),
-            planar_configuration: self.planar_configuration.to_code(),
-            subfile_type: self.subfile_type,
-            extra_tags: &extra_tags,
-            offsets_tag_code,
-            byte_counts_tag_code,
-            num_blocks,
-            layout_tags: &layout_tags,
-            is_bigtiff,
-        })
     }
 
     /// Checked build of the serialized TIFF tags for this image definition.
@@ -577,19 +427,6 @@ impl ImageBuilder {
         }
     }
 
-    fn block_plane_index(&self, index: usize) -> usize {
-        if matches!(self.planar_configuration, PlanarConfiguration::Planar) {
-            let blocks_per_plane = self.legacy_blocks_per_plane();
-            if blocks_per_plane == 0 {
-                0
-            } else {
-                index % blocks_per_plane
-            }
-        } else {
-            index
-        }
-    }
-
     fn checked_block_plane_index(&self, index: usize) -> crate::error::Result<usize> {
         if matches!(self.planar_configuration, PlanarConfiguration::Planar) {
             let blocks_per_plane = self.checked_blocks_per_plane()?;
@@ -622,39 +459,6 @@ impl ImageBuilder {
         }
     }
 
-    fn legacy_blocks_per_plane(&self) -> usize {
-        match self.layout {
-            DataLayout::Strips { rows_per_strip } => {
-                let rps = rows_per_strip.max(1) as usize;
-                (self.height as usize).div_ceil(rps)
-            }
-            DataLayout::Tiles { width, height } => {
-                let tw = width.max(1) as usize;
-                let th = height.max(1) as usize;
-                let tiles_across = (self.width as usize).div_ceil(tw);
-                let tiles_down = (self.height as usize).div_ceil(th);
-                tiles_across.saturating_mul(tiles_down)
-            }
-        }
-    }
-
-    fn legacy_layout_tags(&self) -> Vec<Tag> {
-        match self.layout {
-            DataLayout::Strips { rows_per_strip } => {
-                vec![Tag::new(
-                    TAG_ROWS_PER_STRIP,
-                    TagValue::Long(vec![rows_per_strip]),
-                )]
-            }
-            DataLayout::Tiles { width, height } => {
-                vec![
-                    Tag::new(TAG_TILE_WIDTH, TagValue::Long(vec![width])),
-                    Tag::new(TAG_TILE_LENGTH, TagValue::Long(vec![height])),
-                ]
-            }
-        }
-    }
-
     /// Height of the block at `index` in pixels.
     ///
     /// Tiles are always full-sized (padded at edges). Strips may be shorter
@@ -663,7 +467,7 @@ impl ImageBuilder {
         match self.layout {
             DataLayout::Tiles { height, .. } => height,
             DataLayout::Strips { rows_per_strip } => {
-                let plane_index = self.block_plane_index(index);
+                let plane_index = self.checked_block_plane_index(index).unwrap_or(index);
                 let rps = rows_per_strip.max(1) as usize;
                 let start_row = plane_index.saturating_mul(rps);
                 let remaining = (self.height as usize).saturating_sub(start_row);
@@ -1042,7 +846,6 @@ fn layout_overflow(context: &'static str) -> crate::error::Error {
 #[cfg(test)]
 mod tests {
     use super::ImageBuilder;
-    use std::panic;
     use tiff_core::{PhotometricInterpretation, PlanarConfiguration};
 
     #[test]
@@ -1138,38 +941,6 @@ mod tests {
         assert!(
             matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("requires at least 3 samples"))
         );
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn legacy_infallible_helpers_do_not_panic_on_invalid_builders() {
-        let builders = vec![
-            ImageBuilder::new(16, 16).strips(0),
-            ImageBuilder::new(16, 16).tiles(0, 16),
-            ImageBuilder::new(16, 16).tiles(16, 0),
-            ImageBuilder::new(16, 16).tiles(15, 16),
-            ImageBuilder::new(16, 16)
-                .photometric(PhotometricInterpretation::Rgb)
-                .samples_per_pixel(1),
-            ImageBuilder::new(u32::MAX, u32::MAX)
-                .sample_type::<u8>()
-                .samples_per_pixel(u16::MAX)
-                .planar_configuration(PlanarConfiguration::Planar)
-                .tiles(16, 16),
-        ];
-
-        for builder in builders {
-            let result = panic::catch_unwind(|| {
-                let _ = builder.block_count();
-                let _ = builder.block_sample_count(usize::MAX);
-                let _ = builder.estimated_uncompressed_bytes();
-                let _ = builder.layout_tags();
-                let _ = builder.build_tags(false);
-                let _ = builder.build_tags(true);
-                let _ = builder.block_height(usize::MAX);
-            });
-            assert!(result.is_ok());
-        }
     }
 
     #[test]
