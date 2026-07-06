@@ -506,7 +506,7 @@ fn cog_reuses_writer_validation_for_invalid_layouts() {
     .write_3d_to(&mut chunky_jpeg_buf, rgb.view())
     .unwrap_err();
     assert!(
-        matches!(err, GeoTiffWriteError::Tiff(tiff_writer::Error::InvalidConfig(message)) if message.contains("one sample per encoded block"))
+        matches!(err, GeoTiffWriteError::Tiff(tiff_writer::Error::InvalidConfig(message)) if message.contains("YCbCr photometric"))
     );
 
     let mut chunky_jpeg_streaming_buf = Cursor::new(Vec::new());
@@ -523,7 +523,7 @@ fn cog_reuses_writer_validation_for_invalid_layouts() {
         Err(err) => err,
     };
     assert!(
-        matches!(err, GeoTiffWriteError::Tiff(tiff_writer::Error::InvalidConfig(message)) if message.contains("one sample per encoded block"))
+        matches!(err, GeoTiffWriteError::Tiff(tiff_writer::Error::InvalidConfig(message)) if message.contains("YCbCr photometric"))
     );
 
     let palette = Array2::<u8>::zeros((16, 16));

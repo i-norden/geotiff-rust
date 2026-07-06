@@ -3,8 +3,8 @@ use std::io::Cursor;
 
 use tiff_core::TagValue;
 use tiff_core::{
-    ColorMap, ColorModel, Compression, ExtraSample, InkSet, Predictor, YCbCrPositioning,
-    LERC_VERSION_2_4,
+    ColorMap, ColorModel, Compression, ExtraSample, InkSet, PhotometricInterpretation, Predictor,
+    YCbCrPositioning, LERC_VERSION_2_4,
 };
 use tiff_reader::{TiffFile, TiffSample};
 use tiff_writer::{
@@ -641,7 +641,7 @@ fn writer_validation_rejects_zero_samples_and_rgb_band_mismatches() {
         )
         .unwrap_err();
     assert!(
-        matches!(err, tiff_writer::Error::InvalidConfig(message) if message.contains("one sample per encoded block"))
+        matches!(err, tiff_writer::Error::InvalidConfig(message) if message.contains("1 or 3 samples per encoded block"))
     );
 
     let mut jpeg_rgb_buf = Cursor::new(Vec::new());
@@ -655,7 +655,7 @@ fn writer_validation_rejects_zero_samples_and_rgb_band_mismatches() {
         )
         .unwrap_err();
     assert!(
-        matches!(err, tiff_writer::Error::InvalidConfig(message) if message.contains("one sample per encoded block"))
+        matches!(err, tiff_writer::Error::InvalidConfig(message) if message.contains("YCbCr photometric"))
     );
 
     let mut jpeg_wide_buf = Cursor::new(Vec::new());
@@ -776,4 +776,66 @@ fn deflate_level_controls_output_size_and_roundtrips() {
         .validate()
         .unwrap_err();
     assert!(err.to_string().contains("Deflate compression"), "{err}");
+}
+
+#[test]
+fn ycbcr_jpeg_interleaved_roundtrip_is_visually_close() {
+    use std::io::Cursor;
+    use tiff_writer::{JpegOptions, TiffWriter, WriteOptions};
+
+    let (width, height) = (32usize, 32usize);
+    let mut rgb = vec![0u8; width * height * 3];
+    for row in 0..height {
+        for col in 0..width {
+            let base = (row * width + col) * 3;
+            rgb[base] = (row * 8) as u8;
+            rgb[base + 1] = (col * 8) as u8;
+            rgb[base + 2] = ((row + col) * 4) as u8;
+        }
+    }
+
+    let mut writer = TiffWriter::new(Cursor::new(Vec::new()), WriteOptions::default()).unwrap();
+    let image = ImageBuilder::new(width as u32, height as u32)
+        .sample_type::<u8>()
+        .samples_per_pixel(3)
+        .photometric(PhotometricInterpretation::YCbCr)
+        .jpeg_options(JpegOptions { quality: 90 })
+        .strips(height as u32);
+    let handle = writer.add_image(image).unwrap();
+    writer.write_block(&handle, 0, &rgb).unwrap();
+    let bytes = writer.finish().unwrap().into_inner();
+
+    let file = tiff_reader::TiffFile::from_bytes(bytes).unwrap();
+    let ifd = file.ifd(0).unwrap();
+    assert_eq!(ifd.photometric_interpretation(), Some(6));
+    assert_eq!(ifd.ycbcr_subsampling().unwrap(), Some([2, 2]));
+
+    let decoded = file.read_decoded_image::<u8>(0).unwrap();
+    assert_eq!(decoded.shape(), &[height, width, 3]);
+    let (values, offset) = decoded.into_raw_vec_and_offset();
+    assert_eq!(offset, Some(0));
+    let mut max_delta = 0u8;
+    for (actual, expected) in values.iter().zip(rgb.iter()) {
+        max_delta = max_delta.max(actual.abs_diff(*expected));
+    }
+    assert!(
+        max_delta <= 24,
+        "lossy YCbCr JPEG roundtrip drifted too far: max delta {max_delta}"
+    );
+}
+
+#[test]
+fn interleaved_jpeg_requires_ycbcr_photometric() {
+    let err = ImageBuilder::new(32, 32)
+        .sample_type::<u8>()
+        .samples_per_pixel(3)
+        .photometric(PhotometricInterpretation::Rgb)
+        .jpeg_options(tiff_writer::JpegOptions::default())
+        .strips(32)
+        .validate()
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("YCbCr photometric"),
+        "unexpected error: {err}"
+    );
 }

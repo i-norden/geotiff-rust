@@ -21,6 +21,8 @@ pub struct BlockEncodingOptions<'a> {
     pub samples_per_pixel: u16,
     pub row_width_pixels: usize,
     pub jpeg_options: Option<&'a JpegOptions>,
+    /// Chroma subsampling for interleaved YCbCr JPEG blocks.
+    pub jpeg_sampling: Option<[u16; 2]>,
     /// Deflate level (0-9) for `Deflate`/`DeflateOld`; `None` uses the codec default.
     pub deflate_level: Option<u32>,
 }
@@ -38,6 +40,7 @@ pub fn compress_block<T: TiffWriteSample>(
         samples_per_pixel,
         row_width_pixels,
         jpeg_options,
+        jpeg_sampling,
         deflate_level,
     } = options;
 
@@ -49,6 +52,7 @@ pub fn compress_block<T: TiffWriteSample>(
             samples_per_pixel,
             row_width_pixels,
             jpeg_options.copied().unwrap_or_default(),
+            jpeg_sampling,
             index,
         );
     }
@@ -75,6 +79,7 @@ fn compress_block_jpeg<T: TiffWriteSample>(
     samples_per_pixel: u16,
     row_width_pixels: usize,
     options: JpegOptions,
+    sampling: Option<[u16; 2]>,
     index: usize,
 ) -> Result<Vec<u8>> {
     if T::BITS_PER_SAMPLE != 8 || T::SAMPLE_FORMAT != 1 {
@@ -123,6 +128,7 @@ fn compress_block_jpeg<T: TiffWriteSample>(
         height,
         samples_per_pixel,
         options,
+        sampling,
         index,
     )
 }
@@ -133,6 +139,7 @@ fn compress_block_jpeg<T: TiffWriteSample>(
     _samples_per_pixel: u16,
     _row_width_pixels: usize,
     _options: JpegOptions,
+    _sampling: Option<[u16; 2]>,
     index: usize,
 ) -> Result<Vec<u8>> {
     Err(Error::CompressionFailed {
@@ -462,6 +469,29 @@ fn compress_jpeg(
     height: usize,
     samples_per_pixel: usize,
     options: JpegOptions,
+    sampling: Option<[u16; 2]>,
+    index: usize,
+) -> Result<Vec<u8>> {
+    compress_jpeg_inner(
+        data,
+        width,
+        height,
+        samples_per_pixel,
+        options,
+        sampling,
+        index,
+    )
+}
+
+#[cfg(feature = "jpeg")]
+#[allow(clippy::too_many_arguments)]
+fn compress_jpeg_inner(
+    data: &[u8],
+    width: usize,
+    height: usize,
+    samples_per_pixel: usize,
+    options: JpegOptions,
+    sampling: Option<[u16; 2]>,
     index: usize,
 ) -> Result<Vec<u8>> {
     let width = u16::try_from(width).map_err(|_| Error::CompressionFailed {
@@ -484,7 +514,19 @@ fn compress_jpeg(
     };
 
     let mut out = Vec::new();
-    jpeg_encoder::Encoder::new(&mut out, options.quality)
+    let mut encoder = jpeg_encoder::Encoder::new(&mut out, options.quality);
+    if let Some([horizontal, vertical]) = sampling {
+        let factor = u8::try_from(horizontal)
+            .ok()
+            .zip(u8::try_from(vertical).ok())
+            .and_then(|(h, v)| jpeg_encoder::SamplingFactor::from_factors(h, v))
+            .ok_or_else(|| Error::CompressionFailed {
+                index,
+                reason: format!("unsupported JPEG chroma subsampling {horizontal}x{vertical}"),
+            })?;
+        encoder.set_sampling_factor(factor);
+    }
+    encoder
         .encode(data, width, height, color_type)
         .map_err(|error| Error::CompressionFailed {
             index,

@@ -287,6 +287,48 @@ fn write_generated_big_endian_fixture(path: &std::path::Path) {
     tiff_writer.finish().unwrap();
 }
 
+fn write_generated_ycbcr_jpeg_fixture(path: &std::path::Path) {
+    let (width, height) = (48u32, 48u32);
+    let mut rgb = vec![0u8; (width * height * 3) as usize];
+    for row in 0..height as usize {
+        for col in 0..width as usize {
+            let base = (row * width as usize + col) * 3;
+            rgb[base] = (row * 5) as u8;
+            rgb[base + 1] = (col * 5) as u8;
+            rgb[base + 2] = ((row + col) * 2) as u8;
+        }
+    }
+
+    let file = File::create(path).unwrap();
+    let writer = BufWriter::new(file);
+    let mut tiff_writer = TiffWriter::new(writer, WriteOptions::default()).unwrap();
+    let image = ImageBuilder::new(width, height)
+        .sample_type::<u8>()
+        .samples_per_pixel(3)
+        .photometric(PhotometricInterpretation::YCbCr)
+        .jpeg_options(JpegOptions { quality: 90 })
+        .tiles(16, 16);
+    let block_count = image.checked_block_count().unwrap();
+    let handle = tiff_writer.add_image(image).unwrap();
+    let tiles_across = (width as usize).div_ceil(16);
+    for block in 0..block_count {
+        let tile_row = block / tiles_across;
+        let tile_col = block % tiles_across;
+        let mut tile = vec![0u8; 16 * 16 * 3];
+        for row in 0..16usize {
+            for col in 0..16usize {
+                let src_row = tile_row * 16 + row;
+                let src_col = tile_col * 16 + col;
+                let src = (src_row * width as usize + src_col) * 3;
+                let dest = (row * 16 + col) * 3;
+                tile[dest..dest + 3].copy_from_slice(&rgb[src..src + 3]);
+            }
+        }
+        tiff_writer.write_block(&handle, block, &tile).unwrap();
+    }
+    tiff_writer.finish().unwrap();
+}
+
 fn write_generated_jpeg_fixture(path: &std::path::Path) {
     let mut gray = vec![0u8; 16 * 16];
     for row in 0..16usize {
@@ -502,6 +544,27 @@ fn matches_gdal_for_generated_jpeg_tiff() {
     assert!(ifd.tag(tiff_core::TAG_JPEG_TABLES).is_none());
 
     assert_gdal_u8_pixels_close_with_tolerance(fixture.path(), 0, 6, 256);
+}
+
+#[test]
+fn matches_gdal_for_generated_ycbcr_jpeg_tiff() {
+    if !reference::python_gdal_available() {
+        eprintln!(
+            "skipping GDAL YCbCr JPEG parity test because Python GDAL bindings are unavailable"
+        );
+        return;
+    }
+
+    let fixture = NamedTempFile::new().unwrap();
+    write_generated_ycbcr_jpeg_fixture(fixture.path());
+
+    let file = TiffFile::open(fixture.path()).unwrap();
+    let ifd = file.ifd(0).unwrap();
+    assert_eq!(ifd.photometric_interpretation(), Some(6));
+    assert_eq!(ifd.ycbcr_subsampling().unwrap(), Some([2, 2]));
+
+    // Lossy codec plus chroma subsampling: allow small per-pixel drift.
+    assert_gdal_u8_pixels_close_with_tolerance(fixture.path(), 0, 8, 2048);
 }
 
 #[test]
