@@ -15,7 +15,7 @@ use crate::ifd::{Ifd, RasterLayout};
 use crate::source::TiffSource;
 use crate::{
     allocate_decode_output, checked_layout_add, checked_layout_mul, read_block_payload,
-    read_gdal_block_payload, DecodeReadOptions, GdalStructuralMetadata, Window,
+    read_gdal_block_payload, DecodeReadOptions, Window,
 };
 
 const TAG_JPEG_TABLES: u16 = 347;
@@ -42,15 +42,7 @@ pub(crate) fn read_window(
     {
         let output = Mutex::new(output.as_mut_slice());
         relevant_specs.par_iter().try_for_each(|&spec| {
-            let block = read_tile_block(
-                source,
-                ifd,
-                byte_order,
-                cache,
-                spec,
-                &layout,
-                options.gdal_structural_metadata,
-            )?;
+            let block = read_tile_block(source, ifd, byte_order, cache, spec, &layout, options)?;
             copy_tile_window_block(&mut output.lock(), block.as_slice(), spec, &layout, window)?;
             Ok::<(), Error>(())
         })?;
@@ -58,15 +50,7 @@ pub(crate) fn read_window(
 
     #[cfg(not(feature = "rayon"))]
     for spec in relevant_specs {
-        let block = read_tile_block(
-            source,
-            ifd,
-            byte_order,
-            cache,
-            spec,
-            &layout,
-            options.gdal_structural_metadata,
-        )?;
+        let block = read_tile_block(source, ifd, byte_order, cache, spec, &layout, options)?;
         copy_tile_window_block(&mut output, block.as_slice(), spec, &layout, window)?;
     }
 
@@ -102,15 +86,7 @@ pub(crate) fn read_window_band(
     {
         let output = Mutex::new(output.as_mut_slice());
         relevant_specs.par_iter().try_for_each(|&spec| {
-            let block = read_tile_block(
-                source,
-                ifd,
-                byte_order,
-                cache,
-                spec,
-                &layout,
-                options.gdal_structural_metadata,
-            )?;
+            let block = read_tile_block(source, ifd, byte_order, cache, spec, &layout, options)?;
             copy_tile_band_window_block(
                 &mut output.lock(),
                 block.as_slice(),
@@ -125,15 +101,7 @@ pub(crate) fn read_window_band(
 
     #[cfg(not(feature = "rayon"))]
     for spec in relevant_specs {
-        let block = read_tile_block(
-            source,
-            ifd,
-            byte_order,
-            cache,
-            spec,
-            &layout,
-            options.gdal_structural_metadata,
-        )?;
+        let block = read_tile_block(source, ifd, byte_order, cache, spec, &layout, options)?;
         copy_tile_band_window_block(
             &mut output,
             block.as_slice(),
@@ -505,7 +473,7 @@ fn read_tile_block(
     cache: &BlockCache,
     spec: TileBlockSpec,
     layout: &RasterLayout,
-    gdal_structural_metadata: Option<&GdalStructuralMetadata>,
+    options: DecodeReadOptions<'_>,
 ) -> Result<Arc<Vec<u8>>> {
     let cache_key = BlockKey {
         ifd_offset: ifd.offset(),
@@ -514,6 +482,23 @@ fn read_tile_block(
     };
     if let Some(cached) = cache.get(&cache_key) {
         return Ok(cached);
+    }
+
+    // GDAL SPARSE_OK semantics: a block with no on-disk payload (zero offset
+    // or zero byte count) decodes as implicit zero fill.
+    if spec.offset == 0 || spec.byte_count == 0 {
+        let decoded_len = block_decode::decoded_block_len(&block_decode::BlockDecodeRequest {
+            ifd,
+            layout: *layout,
+            byte_order,
+            compressed: &[],
+            index: spec.index,
+            jpeg_tables: None,
+            block_width: spec.tile_width,
+            block_height: spec.tile_height,
+        })?;
+        let decoded = allocate_decode_output(decoded_len, options.decode_output_bytes)?;
+        return Ok(cache.insert(cache_key, decoded));
     }
 
     let jpeg_tables = ifd
@@ -530,7 +515,7 @@ fn read_tile_block(
             block_width: spec.tile_width,
             block_height: spec.tile_height,
         })?;
-    let compressed = match gdal_structural_metadata {
+    let compressed = match options.gdal_structural_metadata {
         Some(metadata) => read_gdal_block_payload(
             source,
             metadata,

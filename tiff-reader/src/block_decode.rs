@@ -125,6 +125,40 @@ pub(crate) fn decode_compressed_block(request: BlockDecodeRequest<'_>) -> Result
     decode_lerc_block(request, expected_len)
 }
 
+/// Final decoded byte length produced by `decode_compressed_block`.
+///
+/// This differs from `expected_encoded_block_len` for layouts whose decode
+/// step changes the sample representation: sub-byte samples unpack to one
+/// byte per sample and subsampled YCbCr expands to full-resolution chroma.
+pub(crate) fn decoded_block_len(request: &BlockDecodeRequest<'_>) -> Result<usize> {
+    let samples = if request.layout.planar_configuration == 1 {
+        request.layout.samples_per_pixel
+    } else {
+        1
+    };
+    let color_model = request.ifd.color_model()?;
+    if is_subsampled_ycbcr_non_jpeg(request.ifd, &color_model) {
+        return request
+            .block_width
+            .checked_mul(request.block_height)
+            .and_then(|pixels| pixels.checked_mul(3))
+            .and_then(|values| values.checked_mul(request.layout.bytes_per_sample))
+            .ok_or_else(|| {
+                Error::InvalidImageLayout("expanded YCbCr block overflows usize".into())
+            });
+    }
+    if request.layout.bits_per_sample < 8 {
+        return request
+            .block_width
+            .checked_mul(samples)
+            .and_then(|row_samples| row_samples.checked_mul(request.block_height))
+            .ok_or_else(|| {
+                Error::InvalidImageLayout("sub-byte block size overflows usize".into())
+            });
+    }
+    expected_encoded_block_len(request, samples)
+}
+
 pub(crate) fn compressed_block_byte_count_limit(request: &BlockDecodeRequest<'_>) -> Result<usize> {
     let samples = if request.layout.planar_configuration == 1 {
         request.layout.samples_per_pixel
