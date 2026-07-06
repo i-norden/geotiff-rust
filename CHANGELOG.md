@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- round integer overview resampling to the nearest value instead of truncating toward zero, and reject GeoTIFF/COG nodata strings that are out of range or fractional for the raster sample type instead of silently saturating the fill value
 - fix decoded YCbCr chroma scaling to honor the `ReferenceBlackWhite` chroma ranges per TIFF 6.0 (`127/(ReferenceMax - ReferenceZero)` for 8-bit samples) instead of always dividing by the full-scale range; output is unchanged for files using the default headroom-free references
 - read sparse strips and tiles (zero offset or zero byte count, as written by GDAL `SPARSE_OK=TRUE`) as implicit zero-filled blocks instead of failing with a decode error
 - fix decoded-block cache collisions between top-level chain IFDs and IFDs parsed at explicit file offsets (such as SubIFD overviews) by keying the cache on the IFD file offset; `BlockKey.ifd_index` is now `BlockKey.ifd_offset: u64` and `Ifd::offset()` exposes the owning file offset
