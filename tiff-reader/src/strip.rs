@@ -18,8 +18,6 @@ use crate::{
     read_gdal_block_payload, DecodeReadOptions, Window,
 };
 
-const TAG_JPEG_TABLES: u16 = 347;
-
 pub(crate) fn read_window(
     source: &dyn TiffSource,
     ifd: &Ifd,
@@ -32,6 +30,8 @@ pub(crate) fn read_window(
     if window.is_empty() {
         return Ok(Vec::new());
     }
+    let ifd_offset = ifd.offset();
+    let context = block_decode::BlockDecodeContext::new(ifd, layout, byte_order)?;
 
     let output_len = window.output_len(&layout)?;
     let mut output = allocate_decode_output(output_len, options.decode_output_bytes)?;
@@ -42,7 +42,7 @@ pub(crate) fn read_window(
     {
         let output = Mutex::new(output.as_mut_slice());
         relevant_specs.par_iter().try_for_each(|&spec| {
-            let block = read_strip_block(source, ifd, byte_order, cache, spec, &layout, options)?;
+            let block = read_strip_block(source, ifd_offset, cache, spec, &context, options)?;
             copy_strip_window_block(&mut output.lock(), block.as_slice(), spec, &layout, window)?;
             Ok::<(), Error>(())
         })?;
@@ -50,7 +50,7 @@ pub(crate) fn read_window(
 
     #[cfg(not(feature = "rayon"))]
     for spec in relevant_specs {
-        let block = read_strip_block(source, ifd, byte_order, cache, spec, &layout, options)?;
+        let block = read_strip_block(source, ifd_offset, cache, spec, &context, options)?;
         copy_strip_window_block(&mut output, block.as_slice(), spec, &layout, window)?;
     }
 
@@ -76,6 +76,8 @@ pub(crate) fn read_window_band(
     if window.is_empty() {
         return Ok(Vec::new());
     }
+    let ifd_offset = ifd.offset();
+    let context = block_decode::BlockDecodeContext::new(ifd, layout, byte_order)?;
 
     let output_len = window.band_output_len(&layout)?;
     let mut output = allocate_decode_output(output_len, options.decode_output_bytes)?;
@@ -86,7 +88,7 @@ pub(crate) fn read_window_band(
     {
         let output = Mutex::new(output.as_mut_slice());
         relevant_specs.par_iter().try_for_each(|&spec| {
-            let block = read_strip_block(source, ifd, byte_order, cache, spec, &layout, options)?;
+            let block = read_strip_block(source, ifd_offset, cache, spec, &context, options)?;
             copy_strip_band_window_block(
                 &mut output.lock(),
                 block.as_slice(),
@@ -101,7 +103,7 @@ pub(crate) fn read_window_band(
 
     #[cfg(not(feature = "rayon"))]
     for spec in relevant_specs {
-        let block = read_strip_block(source, ifd, byte_order, cache, spec, &layout, options)?;
+        let block = read_strip_block(source, ifd_offset, cache, spec, &context, options)?;
         copy_strip_band_window_block(
             &mut output,
             block.as_slice(),
@@ -389,15 +391,14 @@ struct StripBlockSpec {
 
 fn read_strip_block(
     source: &dyn TiffSource,
-    ifd: &Ifd,
-    byte_order: ByteOrder,
+    ifd_offset: u64,
     cache: &BlockCache,
     spec: StripBlockSpec,
-    layout: &RasterLayout,
+    context: &block_decode::BlockDecodeContext<'_>,
     options: DecodeReadOptions<'_>,
 ) -> Result<Arc<Vec<u8>>> {
     let cache_key = BlockKey {
-        ifd_offset: ifd.offset(),
+        ifd_offset,
         kind: BlockKind::Strip,
         block_index: spec.index,
     };
@@ -409,38 +410,29 @@ fn read_strip_block(
     // or zero byte count) decodes as implicit zero fill.
     if spec.offset == 0 || spec.byte_count == 0 {
         let decoded_len = block_decode::decoded_block_len(&block_decode::BlockDecodeRequest {
-            ifd,
-            layout: *layout,
-            byte_order,
+            context,
             compressed: &[],
             index: spec.index,
-            jpeg_tables: None,
-            block_width: layout.width,
+            block_width: context.layout.width,
             block_height: spec.rows_in_strip,
         })?;
         let decoded = allocate_decode_output(decoded_len, options.decode_output_bytes)?;
         return Ok(cache.insert(cache_key, decoded));
     }
 
-    let jpeg_tables = ifd
-        .tag(TAG_JPEG_TABLES)
-        .and_then(|tag| tag.value.as_bytes());
     let byte_count_limit =
         block_decode::compressed_block_byte_count_limit(&block_decode::BlockDecodeRequest {
-            ifd,
-            layout: *layout,
-            byte_order,
+            context,
             compressed: &[],
             index: spec.index,
-            jpeg_tables,
-            block_width: layout.width,
+            block_width: context.layout.width,
             block_height: spec.rows_in_strip,
         })?;
     let compressed = match options.gdal_structural_metadata {
         Some(metadata) => read_gdal_block_payload(
             source,
             metadata,
-            byte_order,
+            context.byte_order,
             spec.offset,
             spec.byte_count,
             byte_count_limit,
@@ -456,13 +448,10 @@ fn read_strip_block(
     };
 
     let decoded = block_decode::decode_compressed_block(block_decode::BlockDecodeRequest {
-        ifd,
-        layout: *layout,
-        byte_order,
+        context,
         compressed: &compressed,
         index: spec.index,
-        jpeg_tables,
-        block_width: layout.width,
+        block_width: context.layout.width,
         block_height: spec.rows_in_strip,
     })?;
     Ok(cache.insert(cache_key, decoded))
