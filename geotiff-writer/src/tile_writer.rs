@@ -117,11 +117,17 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
             )));
         }
         let mut padded = vec![self.fill_value; tw * th];
-        for row in 0..data_h {
-            for col in 0..data_w {
-                padded[row * tw + col] = data[[row, col]];
-            }
-        }
+        crate::raster_copy::copy_2d_region_into(
+            data,
+            crate::raster_copy::Region {
+                row_start: 0,
+                col_start: 0,
+                rows: data_h,
+                cols: data_w,
+            },
+            &mut padded,
+            tw,
+        );
 
         self.writer.write_block(&self.handle, tile_index, &padded)?;
         self.written[tile_index] = true;
@@ -178,11 +184,18 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
         if matches!(self.planar_configuration, PlanarConfiguration::Planar) {
             for band in 0..spp {
                 let mut padded = vec![self.fill_value; tw * th];
-                for row in 0..data_h {
-                    for col in 0..data_w {
-                        padded[row * tw + col] = data[[row, col, band]];
-                    }
-                }
+                crate::raster_copy::copy_3d_band_region_into(
+                    data,
+                    band,
+                    crate::raster_copy::Region {
+                        row_start: 0,
+                        col_start: 0,
+                        rows: data_h,
+                        cols: data_w,
+                    },
+                    &mut padded,
+                    tw,
+                );
                 let block_index = band * tiles_per_plane + tile_index;
                 self.writer
                     .write_block(&self.handle, block_index, &padded)?;
@@ -190,13 +203,17 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
             }
         } else {
             let mut padded = vec![self.fill_value; tw * th * spp];
-            for row in 0..data_h {
-                for col in 0..data_w {
-                    for band in 0..spp {
-                        padded[(row * tw + col) * spp + band] = data[[row, col, band]];
-                    }
-                }
-            }
+            crate::raster_copy::copy_3d_chunky_region_into(
+                data,
+                crate::raster_copy::Region {
+                    row_start: 0,
+                    col_start: 0,
+                    rows: data_h,
+                    cols: data_w,
+                },
+                &mut padded,
+                tw * spp,
+            );
 
             self.writer.write_block(&self.handle, tile_index, &padded)?;
             self.written[tile_index] = true;

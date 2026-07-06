@@ -745,21 +745,21 @@ impl GeoTiffBuilder {
             let tile_col = block_idx % tiles_across;
             let start_row = tile_row * th;
             let start_col = tile_col * tw;
+            let rows = th.min((self.height as usize).saturating_sub(start_row));
+            let cols = tw.min((self.width as usize).saturating_sub(start_col));
 
             let mut tile_data = vec![zero; tw * th];
-            for row in 0..th {
-                let src_row = start_row + row;
-                if src_row >= self.height as usize {
-                    break;
-                }
-                for col in 0..tw {
-                    let src_col = start_col + col;
-                    if src_col >= self.width as usize {
-                        break;
-                    }
-                    tile_data[row * tw + col] = data[[src_row, src_col]];
-                }
-            }
+            crate::raster_copy::copy_2d_region_into(
+                data,
+                crate::raster_copy::Region {
+                    row_start: start_row,
+                    col_start: start_col,
+                    rows,
+                    cols,
+                },
+                &mut tile_data,
+                tw,
+            );
             tile_data
         } else {
             let rps = self.height.min(256) as usize;
@@ -767,12 +767,18 @@ impl GeoTiffBuilder {
             let end_row = ((block_idx + 1) * rps).min(self.height as usize);
             let w = self.width as usize;
 
-            let mut samples = Vec::with_capacity((end_row - start_row) * w);
-            for row in start_row..end_row {
-                for col in 0..w {
-                    samples.push(data[[row, col]]);
-                }
-            }
+            let mut samples = vec![zero; (end_row - start_row) * w];
+            crate::raster_copy::copy_2d_region_into(
+                data,
+                crate::raster_copy::Region {
+                    row_start: start_row,
+                    col_start: 0,
+                    rows: end_row - start_row,
+                    cols: w,
+                },
+                &mut samples,
+                w,
+            );
             samples
         }
     }
@@ -794,40 +800,36 @@ impl GeoTiffBuilder {
             let start_row = tile_row * th;
             let start_col = tile_col * tw;
 
+            let rows = th.min((self.height as usize).saturating_sub(start_row));
+            let cols = tw.min((self.width as usize).saturating_sub(start_col));
             if matches!(self.planar_configuration, PlanarConfiguration::Planar) {
                 let mut tile_data = vec![zero; tw * th];
-                for row in 0..th {
-                    let src_row = start_row + row;
-                    if src_row >= self.height as usize {
-                        break;
-                    }
-                    for col in 0..tw {
-                        let src_col = start_col + col;
-                        if src_col >= self.width as usize {
-                            break;
-                        }
-                        tile_data[row * tw + col] = data[[src_row, src_col, plane]];
-                    }
-                }
+                crate::raster_copy::copy_3d_band_region_into(
+                    data,
+                    plane,
+                    crate::raster_copy::Region {
+                        row_start: start_row,
+                        col_start: start_col,
+                        rows,
+                        cols,
+                    },
+                    &mut tile_data,
+                    tw,
+                );
                 tile_data
             } else {
                 let mut tile_data = vec![zero; tw * th * bands];
-                for row in 0..th {
-                    let src_row = start_row + row;
-                    if src_row >= self.height as usize {
-                        break;
-                    }
-                    for col in 0..tw {
-                        let src_col = start_col + col;
-                        if src_col >= self.width as usize {
-                            break;
-                        }
-                        for band in 0..bands {
-                            tile_data[(row * tw + col) * bands + band] =
-                                data[[src_row, src_col, band]];
-                        }
-                    }
-                }
+                crate::raster_copy::copy_3d_chunky_region_into(
+                    data,
+                    crate::raster_copy::Region {
+                        row_start: start_row,
+                        col_start: start_col,
+                        rows,
+                        cols,
+                    },
+                    &mut tile_data,
+                    tw * bands,
+                );
                 tile_data
             }
         } else {
@@ -839,23 +841,35 @@ impl GeoTiffBuilder {
             let end_row = ((plane_block_index + 1) * rps).min(self.height as usize);
             let w = self.width as usize;
 
+            let rows = end_row - start_row;
             if matches!(self.planar_configuration, PlanarConfiguration::Planar) {
-                let mut samples = Vec::with_capacity((end_row - start_row) * w);
-                for row in start_row..end_row {
-                    for col in 0..w {
-                        samples.push(data[[row, col, plane]]);
-                    }
-                }
+                let mut samples = vec![zero; rows * w];
+                crate::raster_copy::copy_3d_band_region_into(
+                    data,
+                    plane,
+                    crate::raster_copy::Region {
+                        row_start: start_row,
+                        col_start: 0,
+                        rows,
+                        cols: w,
+                    },
+                    &mut samples,
+                    w,
+                );
                 samples
             } else {
-                let mut samples = Vec::with_capacity((end_row - start_row) * w * bands);
-                for row in start_row..end_row {
-                    for col in 0..w {
-                        for band in 0..bands {
-                            samples.push(data[[row, col, band]]);
-                        }
-                    }
-                }
+                let mut samples = vec![zero; rows * w * bands];
+                crate::raster_copy::copy_3d_chunky_region_into(
+                    data,
+                    crate::raster_copy::Region {
+                        row_start: start_row,
+                        col_start: 0,
+                        rows,
+                        cols: w,
+                    },
+                    &mut samples,
+                    w * bands,
+                );
                 samples
             }
         }

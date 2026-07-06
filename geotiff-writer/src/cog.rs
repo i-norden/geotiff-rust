@@ -1168,11 +1168,17 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
 
         let tile_index = tile_row * self.tiles_across as usize + tile_col;
         let mut padded = self.fill_block.clone();
-        for row in 0..data_h {
-            for col in 0..data_w {
-                padded[row * tw + col] = data[[row, col]];
-            }
-        }
+        crate::raster_copy::copy_2d_region_into(
+            data,
+            crate::raster_copy::Region {
+                row_start: 0,
+                col_start: 0,
+                rows: data_h,
+                cols: data_w,
+            },
+            &mut padded,
+            tw,
+        );
         self.base_tiles.write_block(tile_index, &padded)?;
         self.written[tile_index] = true;
 
@@ -1231,24 +1237,35 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             let tiles_per_plane = self.tiles_across as usize * self.tiles_down as usize;
             for band in 0..bands {
                 let mut padded = vec![self.fill_value; tw * th];
-                for row in 0..data_h {
-                    for col in 0..data_w {
-                        padded[row * tw + col] = data[[row, col, band]];
-                    }
-                }
+                crate::raster_copy::copy_3d_band_region_into(
+                    data,
+                    band,
+                    crate::raster_copy::Region {
+                        row_start: 0,
+                        col_start: 0,
+                        rows: data_h,
+                        cols: data_w,
+                    },
+                    &mut padded,
+                    tw,
+                );
                 let block_index = band * tiles_per_plane + tile_index;
                 self.base_tiles.write_block(block_index, &padded)?;
                 self.written[block_index] = true;
             }
         } else {
             let mut padded = self.fill_block.clone();
-            for row in 0..data_h {
-                for col in 0..data_w {
-                    for band in 0..bands {
-                        padded[(row * tw + col) * bands + band] = data[[row, col, band]];
-                    }
-                }
-            }
+            crate::raster_copy::copy_3d_chunky_region_into(
+                data,
+                crate::raster_copy::Region {
+                    row_start: 0,
+                    col_start: 0,
+                    rows: data_h,
+                    cols: data_w,
+                },
+                &mut padded,
+                tw * bands,
+            );
             self.base_tiles.write_block(tile_index, &padded)?;
             self.written[tile_index] = true;
         }
@@ -1660,20 +1677,21 @@ fn spool_tiled_data_3d<T: NumericSample>(
                 for tile_col in 0..tiles_across {
                     let tile_index = tile_row * tiles_across + tile_col;
                     let block_index = band * tiles_per_plane + tile_index;
+                    let rows = th.min(height.saturating_sub(tile_row * th));
+                    let cols = tw.min(width.saturating_sub(tile_col * tw));
                     let mut tile_data = vec![fill_value; tw * th];
-                    for row in 0..th {
-                        let src_row = tile_row * th + row;
-                        if src_row >= height {
-                            break;
-                        }
-                        for col in 0..tw {
-                            let src_col = tile_col * tw + col;
-                            if src_col >= width {
-                                break;
-                            }
-                            tile_data[row * tw + col] = data[[src_row, src_col, band]];
-                        }
-                    }
+                    crate::raster_copy::copy_3d_band_region_into(
+                        &data,
+                        band,
+                        crate::raster_copy::Region {
+                            row_start: tile_row * th,
+                            col_start: tile_col * tw,
+                            rows,
+                            cols,
+                        },
+                        &mut tile_data,
+                        tw,
+                    );
                     blocks[block_index] = spool_cog_block(
                         spool,
                         &tile_data,
@@ -1695,23 +1713,20 @@ fn spool_tiled_data_3d<T: NumericSample>(
         for tile_row in 0..tiles_down {
             for tile_col in 0..tiles_across {
                 let block_index = tile_row * tiles_across + tile_col;
+                let rows = th.min(height.saturating_sub(tile_row * th));
+                let cols = tw.min(width.saturating_sub(tile_col * tw));
                 let mut tile_data = vec![fill_value; tw * th * bands];
-                for row in 0..th {
-                    let src_row = tile_row * th + row;
-                    if src_row >= height {
-                        break;
-                    }
-                    for col in 0..tw {
-                        let src_col = tile_col * tw + col;
-                        if src_col >= width {
-                            break;
-                        }
-                        for band in 0..bands {
-                            tile_data[(row * tw + col) * bands + band] =
-                                data[[src_row, src_col, band]];
-                        }
-                    }
-                }
+                crate::raster_copy::copy_3d_chunky_region_into(
+                    &data,
+                    crate::raster_copy::Region {
+                        row_start: tile_row * th,
+                        col_start: tile_col * tw,
+                        rows,
+                        cols,
+                    },
+                    &mut tile_data,
+                    tw * bands,
+                );
                 blocks[block_index] = spool_cog_block(
                     spool,
                     &tile_data,
