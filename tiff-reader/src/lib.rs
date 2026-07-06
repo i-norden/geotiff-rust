@@ -291,71 +291,86 @@ pub(crate) fn read_gdal_block_payload(
     index: usize,
 ) -> Result<Vec<u8>> {
     let payload_len = validate_block_byte_count(index, byte_count, byte_count_limit)?;
-    let wrapped_extra = 4u64
-        .checked_add(if metadata.block_trailer_repeats_last_4_bytes {
-            4
-        } else {
-            0
-        })
-        .ok_or_else(|| Error::InvalidImageLayout("GDAL block wrapper overflows u64".into()))?;
 
-    let mut candidates = Vec::with_capacity(2);
-    if metadata.block_leader_size_as_u32 && offset >= 4 {
-        candidates.push((
-            offset - 4,
-            byte_count.checked_add(wrapped_extra).ok_or_else(|| {
-                Error::InvalidImageLayout("GDAL wrapped block length overflows u64".into())
-            })?,
-        ));
-    }
-    candidates.push((offset, byte_count));
-
-    let mut fallback: Option<Result<Vec<u8>>> = None;
-    for (candidate_offset, candidate_len) in candidates {
-        let len = usize::try_from(candidate_len).map_err(|_| Error::OffsetOutOfBounds {
-            offset: candidate_offset,
-            length: candidate_len,
-            data_len: source.len(),
-        })?;
-        let raw = match source.read_exact_at(candidate_offset, len) {
-            Ok(raw) => raw,
-            Err(err) => {
-                if fallback.is_none() {
-                    fallback = Some(Err(err));
-                }
-                continue;
-            }
-        };
-        match metadata.unwrap_block(&raw, byte_order, candidate_offset) {
-            Ok(payload) => {
-                if payload.len() > byte_count_limit {
-                    let err =
-                        block_byte_count_too_large(index, payload.len() as u64, byte_count_limit);
-                    if candidate_offset == offset {
-                        return Err(err);
-                    }
-                    if fallback.is_none() {
-                        fallback = Some(Err(err));
-                    }
-                    continue;
-                }
-                if candidate_offset != offset && payload.len() == payload_len {
-                    return Ok(payload.to_vec());
-                }
-                fallback = Some(Ok(payload.to_vec()));
-            }
-            Err(err) => {
-                if fallback.is_none() {
-                    fallback = Some(Err(err));
-                }
-            }
+    // GDAL's COG ghost area wraps each block in a 4-byte size leader (plus an
+    // optional repeated 4-byte trailer) while the IFD offset points at the
+    // payload itself. Read the wrapped copy first; it wins outright when its
+    // unwrapped payload has exactly the declared length.
+    let wrapped_result = (metadata.block_leader_size_as_u32 && offset >= 4).then(|| {
+        read_wrapped_gdal_block(
+            source,
+            metadata,
+            byte_order,
+            offset,
+            byte_count,
+            byte_count_limit,
+            index,
+        )
+    });
+    if let Some(Ok(payload)) = &wrapped_result {
+        if payload.len() == payload_len {
+            return Ok(payload.clone());
         }
     }
 
-    match fallback {
-        Some(result) => result,
-        None => Ok(Vec::new()),
+    // Otherwise a successful direct read of the declared payload range wins,
+    // with a mismatched-but-readable wrapped payload as the last resort.
+    let direct_result = source
+        .read_exact_at(offset, payload_len)
+        .and_then(|raw| Ok(metadata.unwrap_block(&raw, byte_order, offset)?.to_vec()));
+    match direct_result {
+        Ok(payload) => {
+            if payload.len() > byte_count_limit {
+                return Err(block_byte_count_too_large(
+                    index,
+                    payload.len() as u64,
+                    byte_count_limit,
+                ));
+            }
+            Ok(payload)
+        }
+        Err(direct_error) => match wrapped_result {
+            Some(Ok(payload)) => Ok(payload),
+            Some(Err(wrapped_error)) => Err(wrapped_error),
+            None => Err(direct_error),
+        },
     }
+}
+
+/// Read and unwrap the leader-prefixed copy of a GDAL ghost-area block.
+fn read_wrapped_gdal_block(
+    source: &dyn TiffSource,
+    metadata: &GdalStructuralMetadata,
+    byte_order: ByteOrder,
+    offset: u64,
+    byte_count: u64,
+    byte_count_limit: usize,
+    index: usize,
+) -> Result<Vec<u8>> {
+    let wrapper_extra = if metadata.block_trailer_repeats_last_4_bytes {
+        8u64
+    } else {
+        4u64
+    };
+    let wrapped_offset = offset - 4;
+    let wrapped_len = byte_count.checked_add(wrapper_extra).ok_or_else(|| {
+        Error::InvalidImageLayout("GDAL wrapped block length overflows u64".into())
+    })?;
+    let len = usize::try_from(wrapped_len).map_err(|_| Error::OffsetOutOfBounds {
+        offset: wrapped_offset,
+        length: wrapped_len,
+        data_len: source.len(),
+    })?;
+    let raw = source.read_exact_at(wrapped_offset, len)?;
+    let payload = metadata.unwrap_block(&raw, byte_order, wrapped_offset)?;
+    if payload.len() > byte_count_limit {
+        return Err(block_byte_count_too_large(
+            index,
+            payload.len() as u64,
+            byte_count_limit,
+        ));
+    }
+    Ok(payload.to_vec())
 }
 
 fn validate_block_byte_count(
@@ -1686,6 +1701,76 @@ mod tests {
             return;
         }
         panic!("tag {tag} not found");
+    }
+
+    fn ghost_metadata(trailer: bool) -> GdalStructuralMetadata {
+        GdalStructuralMetadata {
+            block_leader_size_as_u32: true,
+            block_trailer_repeats_last_4_bytes: trailer,
+        }
+    }
+
+    fn read_ghost_payload(
+        bytes: Vec<u8>,
+        metadata: &GdalStructuralMetadata,
+        offset: u64,
+        byte_count: u64,
+    ) -> crate::error::Result<Vec<u8>> {
+        let source = BytesSource::new(bytes);
+        super::read_gdal_block_payload(
+            &source,
+            metadata,
+            crate::ByteOrder::LittleEndian,
+            offset,
+            byte_count,
+            1024,
+            0,
+        )
+    }
+
+    #[test]
+    fn ghost_block_prefers_wrapped_copy_with_matching_length() {
+        // leader(4) | payload(4) | trailer(4, repeats last 4 payload bytes)
+        let payload = [10u8, 20, 30, 40];
+        let mut bytes = 4u32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&payload);
+        bytes.extend_from_slice(&payload);
+
+        let result = read_ghost_payload(bytes, &ghost_metadata(true), 4, 4).unwrap();
+        assert_eq!(result, payload);
+    }
+
+    #[test]
+    fn ghost_block_falls_back_to_direct_read_without_leader() {
+        // No leader bytes in the file even though the metadata declares one:
+        // the direct payload-range read must win.
+        let bytes = vec![9u8, 9, 9, 9, 1, 2, 3, 4];
+        let result = read_ghost_payload(bytes, &ghost_metadata(false), 4, 4).unwrap();
+        assert_eq!(result, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn ghost_block_falls_back_when_wrapped_read_is_out_of_bounds() {
+        // Wrapped read (offset-4 .. +leader+trailer) would run past EOF; the
+        // direct read still succeeds.
+        let mut bytes = vec![0u8; 4];
+        bytes.extend_from_slice(&[5, 6, 7, 8]);
+        let result = read_ghost_payload(bytes, &ghost_metadata(true), 4, 4).unwrap();
+        assert_eq!(result, vec![5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn ghost_block_skips_wrapped_read_for_small_offsets() {
+        let bytes = vec![11u8, 12, 13, 14];
+        let result = read_ghost_payload(bytes, &ghost_metadata(true), 0, 4).unwrap();
+        assert_eq!(result, vec![11, 12, 13, 14]);
+    }
+
+    #[test]
+    fn ghost_block_errors_when_both_reads_fail() {
+        let bytes = vec![0u8; 4];
+        let error = read_ghost_payload(bytes, &ghost_metadata(false), 8, 4).unwrap_err();
+        assert!(matches!(error, Error::OffsetOutOfBounds { .. }), "{error}");
     }
 
     #[test]

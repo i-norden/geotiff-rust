@@ -2,7 +2,19 @@
 
 ## Unreleased
 
+Breaking changes:
+
+- remove the `ImageBuilder` helpers deprecated since 0.6.0 (`block_count`, `block_sample_count`, `estimated_uncompressed_bytes`, `layout_tags`, `build_tags`); use the `checked_*` equivalents
+- collapse duplicate reader methods: `read_*_samples` and `read_*_sample_bytes` aliases fold into `read_image` / `read_window` / `read_band*` and the `*_bytes` variants on `TiffFile` and `GeoTiffFile`
+- `Ifd::rows_per_strip` returns `u32` (it always resolved to a value); `Ifd::bits_per_sample` / `Ifd::sample_format` are now the validating `Result` accessors introduced in this release
+- `GeoTiffBuilder::write_2d`/`write_3d` require `NumericSample` (implemented for every supported sample type) so plain GeoTIFF writes validate nodata and pad edge blocks with the nodata fill
+- `BlockKey.ifd_index` is now `BlockKey.ifd_offset: u64` and `BlockEncodingOptions` gains a `deflate_level` field
+- remove unused `geotiff_reader::Error` variants (`UnsupportedModelType`, `UnknownEpsg`, `BandOutOfBounds`, `NoGeoTransform`); `lru`/`parking_lot` are only pulled in by the `cog` feature and `memmap2`/`smallvec` dependencies are dropped
+
+Other changes:
+
 - add optional `f16` features to the TIFF and GeoTIFF readers/writers, enabling `half::f16` rasters encoded as `SampleFormat=Float` with 16 bits per sample
+- restructure the GDAL ghost-area block reader into explicit wrapped/direct phases with a candidate-outcome test matrix, and move SubIFD tag-offset math into `tiff_writer::encoder::find_tag_value_offset`
 - add `deflate_level(0..=9)` to `ImageBuilder` and `GeoTiffBuilder` for controlling Deflate output size/speed, plus `compress_with_level` in `tiff-writer::compress`; `BlockEncodingOptions` gains a `deflate_level` field
 - speed up decode and write paths: switch the Deflate backend to the pure-Rust `zlib-rs` (~20-40% faster on predictor-compressed rasters), stream overview resampling by source row spans (~6x faster streaming COG average overviews), copy raster regions by row slice instead of per-element indexing (~4.5x faster plain multiband writes), resolve per-block decode metadata once per read, encode writer tag values once, and reuse the floating-point predictor scratch buffer across rows
 - pad one-shot COG edge tiles with the configured nodata fill value instead of zero, matching the streaming tile writer and overview generation paths

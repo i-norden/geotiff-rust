@@ -147,8 +147,8 @@ fn f16_roundtrips_across_byte_orders_and_float_predictors() {
 
             let file = TiffFile::from_bytes(buf.into_inner()).unwrap();
             let ifd = file.ifd(0).unwrap();
-            assert_eq!(ifd.bits_per_sample(), vec![16]);
-            assert_eq!(ifd.sample_format(), vec![3]);
+            assert_eq!(ifd.bits_per_sample().unwrap(), vec![16]);
+            assert_eq!(ifd.sample_format().unwrap(), vec![3]);
             let actual = file.read_image::<f16>(0).unwrap();
             assert_eq!(
                 actual
