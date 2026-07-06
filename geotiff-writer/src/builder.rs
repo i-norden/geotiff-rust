@@ -56,6 +56,7 @@ pub struct GeoTiffBuilder {
     pub(crate) lerc_options: Option<tiff_writer::LercOptions>,
     pub(crate) jpeg_options: Option<JpegOptions>,
     pub(crate) deflate_level: Option<u32>,
+    pub(crate) sparse: bool,
     pub(crate) extra_samples: Vec<ExtraSample>,
     pub(crate) color_map: Option<ColorMap>,
     pub(crate) ink_set: Option<InkSet>,
@@ -87,6 +88,7 @@ impl GeoTiffBuilder {
             lerc_options: None,
             jpeg_options: None,
             deflate_level: None,
+            sparse: false,
             extra_samples: Vec::new(),
             color_map: None,
             ink_set: None,
@@ -305,6 +307,15 @@ impl GeoTiffBuilder {
     /// of `LERC+Deflate` always uses the codec default level.
     pub fn deflate_level(mut self, level: u32) -> Self {
         self.deflate_level = Some(level);
+        self
+    }
+
+    /// Skip all-zero blocks on write (GDAL `SPARSE_OK` semantics).
+    ///
+    /// Sparse blocks are recorded with zero offsets and byte counts and read
+    /// back as zero fill. Negative float zero is treated as zero.
+    pub fn sparse(mut self, sparse: bool) -> Self {
+        self.sparse = sparse;
         self
     }
 
@@ -686,7 +697,11 @@ impl GeoTiffBuilder {
 
         for block_idx in 0..block_count {
             let samples = self.extract_block_2d(&data, block_idx, layout, fill_value);
-            writer.write_block(&handle, block_idx, &samples)?;
+            if self.sparse && samples.iter().all(|&value| value == T::zero()) {
+                writer.write_block_sparse(&handle, block_idx)?;
+            } else {
+                writer.write_block(&handle, block_idx, &samples)?;
+            }
         }
 
         writer.finish()?;
@@ -728,7 +743,11 @@ impl GeoTiffBuilder {
 
         for block_idx in 0..block_count {
             let samples = self.extract_block_3d(&data, block_idx, layout, fill_value);
-            writer.write_block(&handle, block_idx, &samples)?;
+            if self.sparse && samples.iter().all(|&value| value == T::zero()) {
+                writer.write_block_sparse(&handle, block_idx)?;
+            } else {
+                writer.write_block(&handle, block_idx, &samples)?;
+            }
         }
 
         writer.finish()?;

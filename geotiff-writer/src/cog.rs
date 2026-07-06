@@ -110,6 +110,7 @@ struct TileWritePlan {
     lerc_options: Option<LercOptions>,
     jpeg_options: Option<JpegOptions>,
     deflate_level: Option<u32>,
+    sparse: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -117,6 +118,9 @@ struct CogBlockRecord {
     spool_offset: u64,
     logical_offset_delta: u64,
     logical_byte_count: u64,
+    /// GDAL `SPARSE_OK` semantics: the block has no payload and is recorded
+    /// with zero offset and byte count.
+    sparse: bool,
 }
 
 struct CogImage {
@@ -188,6 +192,7 @@ impl BlockSpool {
             spool_offset,
             logical_offset_delta: prefix_len,
             logical_byte_count: payload_len,
+            sparse: false,
         })
     }
 
@@ -617,6 +622,11 @@ fn plan_cog_layout_for_variant(
     let data_start = current;
     for (image, planned) in images.iter().zip(image_plans.iter_mut()) {
         for block in &image.blocks {
+            if block.sparse {
+                planned.block_offsets.push(0);
+                planned.block_byte_counts.push(0);
+                continue;
+            }
             let physical_start =
                 checked_add_u64(data_start, block.spool_offset, "COG block physical offset")?;
             let logical_offset = checked_add_u64(
@@ -1007,6 +1017,7 @@ impl CogBuilder {
             lerc_options: self.inner.lerc_options,
             jpeg_options: self.inner.jpeg_options,
             deflate_level: self.inner.deflate_level,
+            sparse: self.inner.sparse,
         };
         let grid = RawTileGrid {
             tile_width: tw,
@@ -1323,6 +1334,7 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             lerc_options: self.lerc_options,
             jpeg_options: self.jpeg_options,
             deflate_level: self.deflate_level,
+            sparse: self.cog.inner.sparse,
         };
         let grid = RawTileGrid {
             tile_width: tw,
@@ -1562,6 +1574,7 @@ where
             spool_offset: 0,
             logical_offset_delta: 0,
             logical_byte_count: 0,
+            sparse: false,
         };
         total_blocks
     ];
@@ -1592,6 +1605,7 @@ where
                             jpeg_options: plan.jpeg_options,
                             deflate_level: plan.deflate_level,
                         },
+                        plan.sparse,
                     )?;
                 }
             }
@@ -1616,6 +1630,7 @@ where
                         jpeg_options: plan.jpeg_options,
                         deflate_level: plan.deflate_level,
                     },
+                    plan.sparse,
                 )?;
             }
         }
@@ -1645,6 +1660,7 @@ fn spool_base_blocks_from_store<T: NumericSample>(
             spool_offset: 0,
             logical_offset_delta: 0,
             logical_byte_count: 0,
+            sparse: false,
         };
         total_blocks
     ];
@@ -1678,6 +1694,7 @@ fn spool_base_blocks_from_store<T: NumericSample>(
                             jpeg_options: plan.jpeg_options,
                             deflate_level: plan.deflate_level,
                         },
+                        plan.sparse,
                     )?;
                 }
             }
@@ -1706,6 +1723,7 @@ fn spool_base_blocks_from_store<T: NumericSample>(
                         jpeg_options: plan.jpeg_options,
                         deflate_level: plan.deflate_level,
                     },
+                    plan.sparse,
                 )?;
             }
         }
@@ -1739,6 +1757,7 @@ fn spool_tiled_data_3d<T: NumericSample>(
             spool_offset: 0,
             logical_offset_delta: 0,
             logical_byte_count: 0,
+            sparse: false,
         };
         total_blocks
     ];
@@ -1782,6 +1801,7 @@ fn spool_tiled_data_3d<T: NumericSample>(
                             jpeg_options: plan.jpeg_options,
                             deflate_level: plan.deflate_level,
                         },
+                        plan.sparse,
                     )?;
                 }
             }
@@ -1818,6 +1838,7 @@ fn spool_tiled_data_3d<T: NumericSample>(
                         jpeg_options: plan.jpeg_options,
                         deflate_level: plan.deflate_level,
                     },
+                    plan.sparse,
                 )?;
             }
         }
@@ -1831,7 +1852,16 @@ fn spool_cog_block<T: NumericSample>(
     samples: &[T],
     block_index: usize,
     encoding: CogBlockEncoding,
+    sparse: bool,
 ) -> Result<CogBlockRecord> {
+    if sparse && samples.iter().all(|&value| value == T::zero()) {
+        return Ok(CogBlockRecord {
+            spool_offset: 0,
+            logical_offset_delta: 0,
+            logical_byte_count: 0,
+            sparse: true,
+        });
+    }
     let compressed = compress_cog_block(samples, block_index, encoding)?;
     let leader = gdal_block_leader(compressed.len(), ByteOrder::LittleEndian)?;
     let trailer = gdal_block_trailer(&compressed);
@@ -1851,6 +1881,7 @@ mod tests {
                 spool_offset: u32::MAX as u64,
                 logical_offset_delta: 4,
                 logical_byte_count: 1,
+                sparse: false,
             }],
             sub_ifd_count: 0,
         }];

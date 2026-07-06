@@ -226,6 +226,28 @@ impl<W: Write + Seek> TiffWriter<W> {
         self.write_block_raw(handle, block_index, &compressed)
     }
 
+    /// Record a sparse block: no payload is written and the block's offset
+    /// and byte count are stored as zero (GDAL `SPARSE_OK` semantics, where
+    /// readers treat such blocks as implicit zero fill).
+    pub fn write_block_sparse(&mut self, handle: &ImageHandle, block_index: usize) -> Result<()> {
+        if self.finalized {
+            return Err(Error::AlreadyFinalized);
+        }
+        let state = self
+            .images
+            .get_mut(handle.index)
+            .ok_or(Error::Other("invalid image handle".into()))?;
+        let total = state.block_records.len();
+        if block_index >= total {
+            return Err(Error::BlockIndexOutOfRange {
+                index: block_index,
+                total,
+            });
+        }
+        state.block_records[block_index] = Some((0, 0));
+        Ok(())
+    }
+
     /// Write a pre-compressed block (bypass the compression pipeline).
     pub fn write_block_raw(
         &mut self,

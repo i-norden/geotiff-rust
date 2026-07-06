@@ -27,6 +27,7 @@ pub struct StreamingTileWriter<T: WriteSample, W: Write + Seek> {
     bands: u32,
     planar_configuration: PlanarConfiguration,
     fill_value: T,
+    sparse: bool,
     written: Vec<bool>,
     _phantom: PhantomData<T>,
 }
@@ -70,6 +71,7 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
             bands: builder.bands,
             planar_configuration: builder.planar_configuration,
             fill_value,
+            sparse: builder.sparse,
             written: vec![false; num_blocks],
             _phantom: PhantomData,
         })
@@ -129,7 +131,7 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
             tw,
         );
 
-        self.writer.write_block(&self.handle, tile_index, &padded)?;
+        self.write_padded_block(tile_index, &padded)?;
         self.written[tile_index] = true;
         Ok(())
     }
@@ -197,8 +199,7 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
                     tw,
                 );
                 let block_index = band * tiles_per_plane + tile_index;
-                self.writer
-                    .write_block(&self.handle, block_index, &padded)?;
+                self.write_padded_block(block_index, &padded)?;
                 self.written[block_index] = true;
             }
         } else {
@@ -215,8 +216,17 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
                 tw * spp,
             );
 
-            self.writer.write_block(&self.handle, tile_index, &padded)?;
+            self.write_padded_block(tile_index, &padded)?;
             self.written[tile_index] = true;
+        }
+        Ok(())
+    }
+
+    fn write_padded_block(&mut self, block_index: usize, padded: &[T]) -> Result<()> {
+        if self.sparse && padded.iter().all(|&value| value == T::zero()) {
+            self.writer.write_block_sparse(&self.handle, block_index)?;
+        } else {
+            self.writer.write_block(&self.handle, block_index, padded)?;
         }
         Ok(())
     }
@@ -232,9 +242,14 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
         };
         let empty_tile = vec![self.fill_value; tw * th * spp];
 
+        let empty_is_sparse = self.sparse && self.fill_value == T::zero();
         for (i, written) in self.written.iter().enumerate() {
             if !*written {
-                self.writer.write_block(&self.handle, i, &empty_tile)?;
+                if empty_is_sparse {
+                    self.writer.write_block_sparse(&self.handle, i)?;
+                } else {
+                    self.writer.write_block(&self.handle, i, &empty_tile)?;
+                }
             }
         }
 
