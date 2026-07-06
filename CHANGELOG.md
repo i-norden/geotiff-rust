@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- speed up decode and write paths: switch the Deflate backend to the pure-Rust `zlib-rs` (~20-40% faster on predictor-compressed rasters), stream overview resampling by source row spans (~6x faster streaming COG average overviews), copy raster regions by row slice instead of per-element indexing (~4.5x faster plain multiband writes), resolve per-block decode metadata once per read, encode writer tag values once, and reuse the floating-point predictor scratch buffer across rows
 - pad one-shot COG edge tiles with the configured nodata fill value instead of zero, matching the streaming tile writer and overview generation paths
 - reject writer configurations that pair the horizontal predictor with float samples, the floating-point predictor with integer samples, or float sample formats below 32 bits, instead of emitting files other readers refuse
 - decode `BitsPerSample`/`SampleFormat` tags stored with nonstandard BYTE or LONG encodings instead of silently falling back to 1-bit defaults, and reject other unexpected tag types via new `Ifd::checked_bits_per_sample` / `Ifd::checked_sample_format` used by all decode paths
