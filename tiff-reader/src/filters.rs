@@ -59,6 +59,26 @@ pub fn fix_endianness_and_predict(
     byte_order: ByteOrder,
     predictor: u16,
 ) -> Result<()> {
+    fix_endianness_and_predict_with_scratch(
+        row,
+        bit_depth,
+        samples,
+        byte_order,
+        predictor,
+        &mut Vec::new(),
+    )
+}
+
+/// Scratch-buffer variant used by per-row decode loops so the floating-point
+/// predictor's working copy is not reallocated for every row.
+pub(crate) fn fix_endianness_and_predict_with_scratch(
+    row: &mut [u8],
+    bit_depth: u16,
+    samples: u16,
+    byte_order: ByteOrder,
+    predictor: u16,
+    scratch: &mut Vec<u8>,
+) -> Result<()> {
     match Predictor::from_code(predictor) {
         Some(Predictor::None) => {
             fix_endianness(row, byte_order, bit_depth);
@@ -70,19 +90,14 @@ pub fn fix_endianness_and_predict(
             Ok(())
         }
         Some(Predictor::FloatingPoint) => match bit_depth {
-            16 => {
-                let mut encoded = row.to_vec();
-                predict_f16(&mut encoded, row, samples);
-                Ok(())
-            }
-            32 => {
-                let mut encoded = row.to_vec();
-                predict_f32(&mut encoded, row, samples);
-                Ok(())
-            }
-            64 => {
-                let mut encoded = row.to_vec();
-                predict_f64(&mut encoded, row, samples);
+            16 | 32 | 64 => {
+                scratch.clear();
+                scratch.extend_from_slice(row);
+                match bit_depth {
+                    16 => predict_f16(scratch, row, samples),
+                    32 => predict_f32(scratch, row, samples),
+                    _ => predict_f64(scratch, row, samples),
+                }
                 Ok(())
             }
             _ => Err(Error::UnsupportedPredictor(3)),

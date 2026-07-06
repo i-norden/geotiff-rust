@@ -80,7 +80,7 @@ pub struct IfdWriteResult {
 }
 
 /// Estimate the encoded size of an IFD, including deferred tag payloads.
-pub fn estimate_ifd_size(byte_order: ByteOrder, is_bigtiff: bool, tags: &[Tag]) -> u64 {
+pub fn estimate_ifd_size(_byte_order: ByteOrder, is_bigtiff: bool, tags: &[Tag]) -> u64 {
     let entry_size: u64 = if is_bigtiff { 20 } else { 12 };
     let inline_max: usize = if is_bigtiff { 8 } else { 4 };
     let next_ptr_size: u64 = if is_bigtiff { 8 } else { 4 };
@@ -88,7 +88,7 @@ pub fn estimate_ifd_size(byte_order: ByteOrder, is_bigtiff: bool, tags: &[Tag]) 
     let deferred_len: u64 = tags
         .iter()
         .map(|tag| {
-            let encoded_len = tag.value.encode(byte_order).len();
+            let encoded_len = tag.value.encoded_len();
             if encoded_len > inline_max {
                 encoded_len as u64
             } else {
@@ -131,40 +131,39 @@ pub fn write_ifd<W: Write + Seek>(
         sink.write_all(&byte_order.write_u16(tags.len() as u16))?;
     }
 
+    // Encode every tag value once; entries and the deferred data area both
+    // reuse these buffers.
+    let encoded_values: Vec<Vec<u8>> = tags
+        .iter()
+        .map(|tag| tag.value.encode(byte_order))
+        .collect();
+
     // Calculate deferred data area start
     let entries_total = tags.len() as u64 * entry_size;
     let deferred_start = ifd_offset + count_size + entries_total + next_ptr_size;
     let mut deferred_offset = deferred_start;
 
-    struct DeferredEntry {
-        data: Vec<u8>,
-        offset: u64,
-    }
-    let mut deferred_entries = Vec::new();
+    let mut deferred_offsets: Vec<Option<u64>> = Vec::with_capacity(tags.len());
     let mut offsets_data_offset = None;
     let mut byte_counts_data_offset = None;
 
     // First pass: determine which tags are deferred and their offsets
-    for tag in tags {
-        let encoded = tag.value.encode(byte_order);
+    for (tag, encoded) in tags.iter().zip(&encoded_values) {
         if encoded.len() > inline_max {
             if tag.code == offsets_tag_code {
                 offsets_data_offset = Some(deferred_offset);
             } else if tag.code == byte_counts_tag_code {
                 byte_counts_data_offset = Some(deferred_offset);
             }
-            let len = encoded.len() as u64;
-            deferred_entries.push(DeferredEntry {
-                data: encoded,
-                offset: deferred_offset,
-            });
-            deferred_offset += len;
+            deferred_offsets.push(Some(deferred_offset));
+            deferred_offset += encoded.len() as u64;
+        } else {
+            deferred_offsets.push(None);
         }
     }
 
     // Second pass: write entries
-    let mut deferred_idx = 0;
-    for tag in tags {
+    for ((tag, encoded), deferred) in tags.iter().zip(&encoded_values).zip(&deferred_offsets) {
         sink.write_all(&byte_order.write_u16(tag.code))?;
         sink.write_all(&byte_order.write_u16(tag.tag_type.to_code()))?;
 
@@ -180,19 +179,19 @@ pub fn write_ifd<W: Write + Seek>(
             sink.write_all(&byte_order.write_u32(tag_count))?;
         }
 
-        let encoded = tag.value.encode(byte_order);
-        if encoded.len() <= inline_max {
-            let mut inline = vec![0u8; inline_max];
-            inline[..encoded.len()].copy_from_slice(&encoded);
-            sink.write_all(&inline)?;
-        } else {
-            let offset = deferred_entries[deferred_idx].offset;
-            if is_bigtiff {
-                sink.write_all(&byte_order.write_u64(offset))?;
-            } else {
-                sink.write_all(&byte_order.write_u32(classic_offset_u32(offset)?))?;
+        match deferred {
+            None => {
+                let mut inline = vec![0u8; inline_max];
+                inline[..encoded.len()].copy_from_slice(encoded);
+                sink.write_all(&inline)?;
             }
-            deferred_idx += 1;
+            Some(offset) => {
+                if is_bigtiff {
+                    sink.write_all(&byte_order.write_u64(*offset))?;
+                } else {
+                    sink.write_all(&byte_order.write_u32(classic_offset_u32(*offset)?))?;
+                }
+            }
         }
     }
 
@@ -205,9 +204,11 @@ pub fn write_ifd<W: Write + Seek>(
     }
 
     // Write deferred data
-    for entry in &deferred_entries {
-        debug_assert_eq!(sink.stream_position()?, entry.offset);
-        sink.write_all(&entry.data)?;
+    for (encoded, deferred) in encoded_values.iter().zip(&deferred_offsets) {
+        if let Some(offset) = deferred {
+            debug_assert_eq!(sink.stream_position()?, *offset);
+            sink.write_all(encoded)?;
+        }
     }
 
     Ok(IfdWriteResult {

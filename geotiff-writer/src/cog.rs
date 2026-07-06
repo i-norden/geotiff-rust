@@ -528,7 +528,7 @@ fn tag_value_storage_offset(
         ifd_offset + count_size + tags.len() as u64 * entry_size + next_ptr_size;
 
     for (index, tag) in tags.iter().enumerate() {
-        let encoded_len = tag.value.encode(ByteOrder::LittleEndian).len();
+        let encoded_len = tag.value.encoded_len();
         if tag.code == target_code {
             return if encoded_len <= inline_max {
                 Some(ifd_offset + count_size + index as u64 * entry_size + value_field_offset)
