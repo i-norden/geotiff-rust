@@ -9,7 +9,13 @@ use parking_lot::Mutex;
 /// Cache key for a decoded strip or tile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlockKey {
-    pub ifd_index: usize,
+    /// File offset of the owning IFD.
+    ///
+    /// The IFD offset uniquely identifies an image no matter how it was
+    /// reached (top-level chain position or SubIFD pointer), unlike the chain
+    /// index, which can collide with the byte offset of an IFD parsed via
+    /// `TiffFile::read_ifd_at_offset`.
+    pub ifd_offset: u64,
     pub kind: BlockKind,
     pub block_index: usize,
 }
@@ -99,17 +105,17 @@ mod tests {
     fn caches_and_promotes_entries() {
         let cache = BlockCache::new(12, 8);
         let a = BlockKey {
-            ifd_index: 0,
+            ifd_offset: 0,
             kind: BlockKind::Strip,
             block_index: 0,
         };
         let b = BlockKey {
-            ifd_index: 0,
+            ifd_offset: 0,
             kind: BlockKind::Strip,
             block_index: 1,
         };
         let c = BlockKey {
-            ifd_index: 0,
+            ifd_offset: 0,
             kind: BlockKind::Strip,
             block_index: 2,
         };
@@ -119,21 +125,21 @@ mod tests {
         cache.insert(c, vec![0; 4]);
 
         let promoted = BlockKey {
-            ifd_index: 0,
+            ifd_offset: 0,
             kind: BlockKind::Strip,
             block_index: 0,
         };
         assert!(cache.get(&promoted).is_some());
 
         let d = BlockKey {
-            ifd_index: 0,
+            ifd_offset: 0,
             kind: BlockKind::Strip,
             block_index: 3,
         };
         cache.insert(d, vec![0; 4]);
 
         let evicted = BlockKey {
-            ifd_index: 0,
+            ifd_offset: 0,
             kind: BlockKind::Strip,
             block_index: 1,
         };
@@ -145,7 +151,7 @@ mod tests {
     fn disabled_cache_bypasses_storage() {
         let cache = BlockCache::new(0, 4);
         let key = BlockKey {
-            ifd_index: 0,
+            ifd_offset: 0,
             kind: BlockKind::Tile,
             block_index: 0,
         };
@@ -157,7 +163,7 @@ mod tests {
     fn zero_slots_disable_cache_storage() {
         let cache = BlockCache::new(1024, 0);
         let key = BlockKey {
-            ifd_index: 0,
+            ifd_offset: 0,
             kind: BlockKind::Tile,
             block_index: 0,
         };
@@ -172,7 +178,7 @@ mod tests {
         for block_index in 0..3 {
             cache.insert(
                 BlockKey {
-                    ifd_index: 0,
+                    ifd_offset: 0,
                     kind: BlockKind::Strip,
                     block_index,
                 },
@@ -187,12 +193,12 @@ mod tests {
     fn replacing_mru_entry_preserves_other_cached_blocks() {
         let cache = BlockCache::new(10, 8);
         let a = BlockKey {
-            ifd_index: 0,
+            ifd_offset: 0,
             kind: BlockKind::Tile,
             block_index: 0,
         };
         let b = BlockKey {
-            ifd_index: 0,
+            ifd_offset: 0,
             kind: BlockKind::Tile,
             block_index: 1,
         };
@@ -212,7 +218,7 @@ mod tests {
     fn oversized_replacement_removes_stale_entry() {
         let cache = BlockCache::new(8, 8);
         let key = BlockKey {
-            ifd_index: 0,
+            ifd_offset: 0,
             kind: BlockKind::Tile,
             block_index: 0,
         };

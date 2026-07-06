@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- fix decoded-block cache collisions between top-level chain IFDs and IFDs parsed at explicit file offsets (such as SubIFD overviews) by keying the cache on the IFD file offset; `BlockKey.ifd_index` is now `BlockKey.ifd_offset: u64` and `Ifd::offset()` exposes the owning file offset
+
 ## 0.7.0 - 2026-06-20
 
 - make memory-mapped local reads explicit through `open_mmap` / `open_mmap_with_options` and keep default file opens on safe file-backed I/O

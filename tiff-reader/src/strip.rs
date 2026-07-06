@@ -429,7 +429,7 @@ fn read_strip_block(
     gdal_structural_metadata: Option<&GdalStructuralMetadata>,
 ) -> Result<Arc<Vec<u8>>> {
     let cache_key = BlockKey {
-        ifd_index: ifd.index,
+        ifd_offset: ifd.offset(),
         kind: BlockKind::Strip,
         block_index: spec.index,
     };
