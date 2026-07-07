@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- read sparse strips and tiles (zero offset or zero byte count, as written by GDAL `SPARSE_OK=TRUE`) as implicit zero-filled blocks instead of failing with a decode error
 - fix decoded-block cache collisions between top-level chain IFDs and IFDs parsed at explicit file offsets (such as SubIFD overviews) by keying the cache on the IFD file offset; `BlockKey.ifd_index` is now `BlockKey.ifd_offset: u64` and `Ifd::offset()` exposes the owning file offset
 
 ## 0.7.0 - 2026-06-20

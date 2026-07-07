@@ -1754,6 +1754,71 @@ mod tests {
         panic!("tag {tag} not found");
     }
 
+    /// Zero one element of a classic LONG-array tag (inline or deferred).
+    fn zero_classic_long_array_element(data: &mut [u8], tag: u16, element_index: usize) {
+        let ifd_offset = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
+        let entry_count = u16::from_le_bytes(data[ifd_offset..ifd_offset + 2].try_into().unwrap());
+        for entry_index in 0..usize::from(entry_count) {
+            let entry = ifd_offset + 2 + entry_index * 12;
+            let entry_tag = u16::from_le_bytes(data[entry..entry + 2].try_into().unwrap());
+            if entry_tag != tag {
+                continue;
+            }
+            let count = u32::from_le_bytes(data[entry + 4..entry + 8].try_into().unwrap()) as usize;
+            assert!(element_index < count, "element index out of range");
+            if count == 1 {
+                data[entry + 8..entry + 12].copy_from_slice(&[0; 4]);
+            } else {
+                let value_offset =
+                    u32::from_le_bytes(data[entry + 8..entry + 12].try_into().unwrap()) as usize;
+                let element = value_offset + element_index * 4;
+                data[element..element + 4].copy_from_slice(&[0; 4]);
+            }
+            return;
+        }
+        panic!("tag {tag} not found");
+    }
+
+    #[test]
+    fn sparse_strip_reads_as_zero_fill() {
+        let rows: [&[u8]; 2] = [&[1, 2, 3, 4], &[5, 6, 7, 8]];
+        let mut data = build_multi_strip_tiff(4, &rows);
+        zero_classic_long_array_element(&mut data, 273, 1); // StripOffsets[1]
+        zero_classic_long_array_element(&mut data, 279, 1); // StripByteCounts[1]
+
+        let file = TiffFile::from_bytes(data).unwrap();
+        assert_eq!(
+            file.read_image_bytes(0).unwrap(),
+            vec![1, 2, 3, 4, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn zero_byte_count_block_reads_as_zero_fill() {
+        let rows: [&[u8]; 2] = [&[1, 2], &[3, 4]];
+        let mut data = build_multi_strip_tiff(2, &rows);
+        zero_classic_long_array_element(&mut data, 279, 0); // StripByteCounts[0]
+
+        let file = TiffFile::from_bytes(data).unwrap();
+        assert_eq!(file.read_image_bytes(0).unwrap(), vec![0, 0, 3, 4]);
+    }
+
+    #[test]
+    fn sparse_tile_reads_as_zero_fill() {
+        let tile0 = vec![9u8; 256];
+        let tile1 = vec![7u8; 256];
+        let mut data = build_tiled_tiff(32, 16, 16, 16, &[&tile0, &tile1]);
+        zero_classic_long_array_element(&mut data, 324, 1); // TileOffsets[1]
+        zero_classic_long_array_element(&mut data, 325, 1); // TileByteCounts[1]
+
+        let file = TiffFile::from_bytes(data).unwrap();
+        let image = file.read_image_bytes(0).unwrap();
+        assert_eq!(image.len(), 32 * 16);
+        assert!(image.chunks(32).all(|row| {
+            row[..16].iter().all(|&value| value == 9) && row[16..].iter().all(|&value| value == 0)
+        }));
+    }
+
     #[test]
     fn open_uses_safe_file_source_without_raw_slice() {
         let path = temp_tiff_path("open_uses_safe_file_source_without_raw_slice");
