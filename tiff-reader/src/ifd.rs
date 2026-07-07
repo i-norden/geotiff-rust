@@ -92,9 +92,20 @@ pub struct Ifd {
     tags: Vec<Tag>,
     /// Index of this IFD in the chain (0-based).
     pub index: usize,
+    /// File offset where this IFD starts.
+    ///
+    /// Unlike `index`, the offset uniquely identifies an IFD no matter how it
+    /// was reached (top-level chain or SubIFD pointer), so it is the key used
+    /// for per-IFD decoded-block caching.
+    offset: u64,
 }
 
 impl Ifd {
+    /// File offset where this IFD starts.
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
     /// Look up a tag by its code.
     pub fn tag(&self, code: u16) -> Option<&Tag> {
         self.tags
@@ -632,7 +643,11 @@ pub fn parse_ifd_chain_with_budgets(
 
         let (tags, next_offset) = read_ifd(source, header, offset, budgets, &mut usage)?;
 
-        ifds.push(Ifd { tags, index });
+        ifds.push(Ifd {
+            tags,
+            index,
+            offset,
+        });
         offset = next_offset;
         index += 1;
     }
@@ -657,6 +672,7 @@ pub fn parse_ifd_at_with_budgets(
     Ok(Ifd {
         tags,
         index: usize::try_from(offset).unwrap_or(usize::MAX),
+        offset,
     })
 }
 
@@ -990,7 +1006,11 @@ mod tests {
     fn make_ifd(tags: Vec<Tag>) -> Ifd {
         let mut tags = tags;
         tags.sort_by_key(|tag| tag.code);
-        Ifd { tags, index: 0 }
+        Ifd {
+            tags,
+            index: 0,
+            offset: 0,
+        }
     }
 
     #[test]

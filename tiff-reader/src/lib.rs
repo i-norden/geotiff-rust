@@ -1228,6 +1228,72 @@ mod tests {
         data
     }
 
+    /// Build a classic TIFF whose chain holds one 1x1 uncompressed IFD per
+    /// pixel value, with every tag value stored inline.
+    fn build_multi_ifd_tiff(pixel_values: &[u8]) -> Vec<u8> {
+        const IFD_ENTRY_COUNT: usize = 8;
+        const IFD_SIZE: usize = 2 + IFD_ENTRY_COUNT * 12 + 4;
+        const IFD_STRIDE: usize = IFD_SIZE + 1; // one 1x1 u8 strip per IFD
+
+        let mut data = Vec::with_capacity(8 + pixel_values.len() * IFD_STRIDE);
+        data.extend_from_slice(b"II");
+        data.extend_from_slice(&le_u16(42));
+        data.extend_from_slice(&le_u32(8));
+
+        for (index, &pixel) in pixel_values.iter().enumerate() {
+            let ifd_offset = 8 + index * IFD_STRIDE;
+            debug_assert_eq!(data.len(), ifd_offset);
+            let image_offset = (ifd_offset + IFD_SIZE) as u32;
+            let next_ifd_offset = if index + 1 < pixel_values.len() {
+                (ifd_offset + IFD_STRIDE) as u32
+            } else {
+                0
+            };
+
+            data.extend_from_slice(&le_u16(IFD_ENTRY_COUNT as u16));
+            for (tag, ty, value) in [
+                (256u16, 4u16, le_u32(1).to_vec()),
+                (257, 4, le_u32(1).to_vec()),
+                (258, 3, inline_short(8)),
+                (259, 3, inline_short(1)),
+                (273, 4, le_u32(image_offset).to_vec()),
+                (277, 3, inline_short(1)),
+                (278, 4, le_u32(1).to_vec()),
+                (279, 4, le_u32(1).to_vec()),
+            ] {
+                data.extend_from_slice(&le_u16(tag));
+                data.extend_from_slice(&le_u16(ty));
+                data.extend_from_slice(&le_u32(1));
+                let mut inline = [0u8; 4];
+                inline[..value.len()].copy_from_slice(&value);
+                data.extend_from_slice(&inline);
+            }
+            data.extend_from_slice(&le_u32(next_ifd_offset));
+            data.push(pixel);
+        }
+        data
+    }
+
+    #[test]
+    fn block_cache_does_not_collide_between_chain_index_and_ifd_offset() {
+        // Ten chained IFDs: chain IFD #8 shares its numeric index with the
+        // file offset (8) of the first IFD.
+        let pixel_values: Vec<u8> = (0..10u8).map(|index| 100 + index).collect();
+        let file = TiffFile::from_bytes(build_multi_ifd_tiff(&pixel_values)).unwrap();
+        assert_eq!(file.ifd_count(), 10);
+
+        // Populate the block cache from chain IFD 8 first.
+        assert_eq!(file.read_image_bytes(8).unwrap(), vec![pixel_values[8]]);
+
+        // Re-parsing the first IFD by offset must decode its own strip, not
+        // return the cached strip of chain IFD 8.
+        let first_ifd = file.read_ifd_at_offset(8).unwrap();
+        assert_eq!(
+            file.read_image_bytes_from_ifd(&first_ifd).unwrap(),
+            vec![pixel_values[0]]
+        );
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn build_lerc2_header_v2(
         width: u32,
