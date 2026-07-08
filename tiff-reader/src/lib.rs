@@ -2264,6 +2264,37 @@ mod tests {
     }
 
     #[test]
+    fn ycbcr_decode_honors_reference_black_white_ranges() {
+        // BT.601 video-range references: luma 16..235, chroma 128 +/- 112.
+        let reference: [u32; 12] = [16, 1, 235, 1, 128, 1, 240, 1, 128, 1, 240, 1];
+        let data = build_stripped_tiff(
+            1,
+            1,
+            &[126u8, 201, 190],
+            &[
+                (
+                    258,
+                    3,
+                    3,
+                    [8u16, 8, 8].into_iter().flat_map(le_u16).collect(),
+                ),
+                (262, 3, 1, inline_short(6)),
+                (277, 3, 1, inline_short(3)),
+                (532, 5, 6, reference.into_iter().flat_map(le_u32).collect()),
+            ],
+        );
+        let file = TiffFile::from_bytes(data).unwrap();
+
+        let image = file.read_decoded_image::<u8>(0).unwrap();
+        let (rgb, offset) = image.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        // Expected values follow the TIFF 6.0 / libtiff formula, which scales
+        // each chroma delta by 127/(ReferenceMax - ReferenceZero) for 8-bit
+        // samples rather than by the full-scale denominator.
+        assert_eq!(rgb, vec![227, 49, 255]);
+    }
+
+    #[test]
     fn reads_horizontal_predictor_u16_strip() {
         let encoded = [1, 0, 1, 0, 2, 0];
         let data = build_stripped_tiff(
