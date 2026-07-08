@@ -641,3 +641,58 @@ fn cog_jpeg_compression_roundtrips_without_jpeg_tables() {
     assert_eq!(geo.overview_count(), 1);
     assert_eq!(geo.read_overview::<u8>(0).unwrap().shape(), &[16, 16]);
 }
+
+#[test]
+fn unrepresentable_nodata_is_rejected_at_write_time() {
+    let builder = GeoTiffBuilder::new(16, 16)
+        .tile_size(16, 16)
+        .nodata("-9999");
+
+    let data = Array2::<u8>::zeros((16, 16));
+    let err = CogBuilder::new(builder.clone())
+        .no_overviews()
+        .write_2d_to(Cursor::new(Vec::new()), data.view())
+        .unwrap_err();
+    assert!(
+        matches!(err, GeoTiffWriteError::InvalidConfig(ref message) if message.contains("not representable")),
+        "{err}"
+    );
+
+    let Err(err) = builder.tile_writer::<u8, _>(Cursor::new(Vec::new())) else {
+        panic!("expected nodata validation error from StreamingTileWriter");
+    };
+    assert!(
+        matches!(err, GeoTiffWriteError::InvalidConfig(ref message) if message.contains("not representable")),
+        "{err}"
+    );
+
+    let Err(err) = CogBuilder::new(
+        GeoTiffBuilder::new(16, 16)
+            .tile_size(16, 16)
+            .nodata("-9999"),
+    )
+    .no_overviews()
+    .tile_writer::<u8, _>(Cursor::new(Vec::new())) else {
+        panic!("expected nodata validation error from CogTileWriter");
+    };
+    assert!(
+        matches!(err, GeoTiffWriteError::InvalidConfig(ref message) if message.contains("not representable")),
+        "{err}"
+    );
+}
+
+#[test]
+fn average_overview_rounds_to_nearest_integer() {
+    let data = Array2::<u8>::from_shape_vec((2, 2), vec![1, 2, 2, 2]).unwrap();
+    let mut buf = Cursor::new(Vec::new());
+    CogBuilder::new(GeoTiffBuilder::new(2, 2).tile_size(16, 16))
+        .overview_levels(vec![2])
+        .resampling(Resampling::Average)
+        .write_2d_to(&mut buf, data.view())
+        .unwrap();
+
+    let tiff = TiffFile::from_bytes(buf.into_inner()).unwrap();
+    let overview = tiff.read_image::<u8>(1).unwrap();
+    // (1 + 2 + 2 + 2) / 4 = 1.75 rounds to 2 rather than truncating to 1.
+    assert_eq!(overview[[0, 0]], 2);
+}

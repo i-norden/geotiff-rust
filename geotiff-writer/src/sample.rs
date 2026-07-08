@@ -7,24 +7,74 @@ pub use tiff_writer::TiffWriteSample as WriteSample;
 pub trait NumericSample: WriteSample + PartialEq {
     fn zero() -> Self;
     fn to_f64(self) -> f64;
+    /// Lossy conversion used by overview resampling; integer types round to
+    /// the nearest value.
     fn from_f64(value: f64) -> Self;
+    /// Checked conversion that returns `None` when `value` cannot be stored
+    /// exactly: out of range for the target type, or fractional for integer
+    /// types.
+    fn try_from_f64(value: f64) -> Option<Self>;
 }
 
-pub(crate) fn parse_nodata_value<T: NumericSample>(nodata: &Option<String>) -> Option<T> {
-    let nd = nodata.as_ref()?;
-    let value = nd.trim().parse::<f64>().ok()?;
-    Some(T::from_f64(value))
+pub(crate) fn parse_nodata_value<T: NumericSample>(
+    nodata: &Option<String>,
+) -> crate::error::Result<Option<T>> {
+    let Some(nd) = nodata.as_ref() else {
+        return Ok(None);
+    };
+    let Ok(value) = nd.trim().parse::<f64>() else {
+        // Non-numeric nodata text stays metadata-only; fills default to zero.
+        return Ok(None);
+    };
+    match T::try_from_f64(value) {
+        Some(value) => Ok(Some(value)),
+        None => Err(crate::error::Error::InvalidConfig(format!(
+            "nodata value {nd:?} is not representable as {}",
+            std::any::type_name::<T>()
+        ))),
+    }
 }
 
-pub(crate) fn nodata_fill_or_zero<T: NumericSample>(nodata: &Option<String>) -> T {
-    parse_nodata_value(nodata).unwrap_or_else(T::zero)
+pub(crate) fn nodata_fill_or_zero<T: NumericSample>(
+    nodata: &Option<String>,
+) -> crate::error::Result<T> {
+    Ok(parse_nodata_value(nodata)?.unwrap_or_else(T::zero))
 }
 
-macro_rules! impl_numeric_sample {
+macro_rules! impl_numeric_sample_int {
     ($ty:ty) => {
         impl NumericSample for $ty {
             fn zero() -> Self {
-                0 as $ty
+                0
+            }
+
+            fn to_f64(self) -> f64 {
+                self as f64
+            }
+
+            fn from_f64(value: f64) -> Self {
+                value.round() as $ty
+            }
+
+            fn try_from_f64(value: f64) -> Option<Self> {
+                if !value.is_finite() {
+                    return None;
+                }
+                // `as` saturates, so converting back detects values outside
+                // the target range; comparing against the original value also
+                // rejects fractional inputs.
+                let converted = value.round() as $ty;
+                (converted as f64 == value).then_some(converted)
+            }
+        }
+    };
+}
+
+macro_rules! impl_numeric_sample_float {
+    ($ty:ty) => {
+        impl NumericSample for $ty {
+            fn zero() -> Self {
+                0.0
             }
 
             fn to_f64(self) -> f64 {
@@ -34,17 +84,70 @@ macro_rules! impl_numeric_sample {
             fn from_f64(value: f64) -> Self {
                 value as $ty
             }
+
+            fn try_from_f64(value: f64) -> Option<Self> {
+                let converted = value as $ty;
+                if value.is_finite() && !converted.is_finite() {
+                    return None; // magnitude exceeds the target float range
+                }
+                Some(converted)
+            }
         }
     };
 }
 
-impl_numeric_sample!(u8);
-impl_numeric_sample!(i8);
-impl_numeric_sample!(u16);
-impl_numeric_sample!(i16);
-impl_numeric_sample!(u32);
-impl_numeric_sample!(i32);
-impl_numeric_sample!(f32);
-impl_numeric_sample!(u64);
-impl_numeric_sample!(i64);
-impl_numeric_sample!(f64);
+impl_numeric_sample_int!(u8);
+impl_numeric_sample_int!(i8);
+impl_numeric_sample_int!(u16);
+impl_numeric_sample_int!(i16);
+impl_numeric_sample_int!(u32);
+impl_numeric_sample_int!(i32);
+impl_numeric_sample_int!(u64);
+impl_numeric_sample_int!(i64);
+impl_numeric_sample_float!(f32);
+impl_numeric_sample_float!(f64);
+
+#[cfg(test)]
+mod tests {
+    use super::{nodata_fill_or_zero, parse_nodata_value, NumericSample};
+
+    #[test]
+    fn from_f64_rounds_integer_types_to_nearest() {
+        assert_eq!(u8::from_f64(1.5), 2);
+        assert_eq!(u8::from_f64(1.4), 1);
+        assert_eq!(i16::from_f64(-2.5), -3);
+        assert_eq!(f32::from_f64(1.5), 1.5);
+    }
+
+    #[test]
+    fn try_from_f64_rejects_out_of_range_and_fractional_integers() {
+        assert_eq!(u8::try_from_f64(-9999.0), None);
+        assert_eq!(u8::try_from_f64(256.0), None);
+        assert_eq!(u8::try_from_f64(42.4), None);
+        assert_eq!(u8::try_from_f64(255.0), Some(255));
+        assert_eq!(i16::try_from_f64(-9999.0), Some(-9999));
+        assert_eq!(i32::try_from_f64(f64::NAN), None);
+    }
+
+    #[test]
+    fn try_from_f64_bounds_float_conversions() {
+        assert_eq!(f32::try_from_f64(1e39), None);
+        assert_eq!(f32::try_from_f64(-9999.0), Some(-9999.0));
+        assert!(f32::try_from_f64(f64::NAN).unwrap().is_nan());
+        assert_eq!(f64::try_from_f64(1e308), Some(1e308));
+    }
+
+    #[test]
+    fn parse_nodata_value_errors_on_unrepresentable_values() {
+        let nodata = Some("-9999".to_string());
+        assert_eq!(parse_nodata_value::<i16>(&nodata).unwrap(), Some(-9999));
+        assert!(parse_nodata_value::<u8>(&nodata).is_err());
+
+        assert_eq!(parse_nodata_value::<u8>(&None).unwrap(), None);
+        assert_eq!(
+            parse_nodata_value::<u8>(&Some("not a number".to_string())).unwrap(),
+            None
+        );
+        assert_eq!(nodata_fill_or_zero::<u8>(&None).unwrap(), 0);
+    }
+}

@@ -966,7 +966,7 @@ impl CogBuilder {
         let th = self.inner.tile_height.unwrap_or(256) as usize;
         let overview_levels = self.normalized_overview_levels()?;
         self.validate_images::<T>(&overview_levels, tw as u32, th as u32)?;
-        let nodata = parse_nodata_value::<T>(&self.inner.nodata);
+        let nodata = parse_nodata_value::<T>(&self.inner.nodata)?;
         let fill_value = nodata.unwrap_or_else(T::zero);
         let prefix = gdal_structural_metadata_bytes(self.inner.planar_configuration);
         let mut spool = BlockSpool::new()?;
@@ -1077,7 +1077,7 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
         let tiles_down = (cog.inner.height as usize).div_ceil(th as usize);
         let overview_levels = cog.normalized_overview_levels()?;
         cog.validate_images::<T>(&overview_levels, tw, th)?;
-        let nodata_value = parse_nodata_value::<T>(&cog.inner.nodata);
+        let nodata_value = parse_nodata_value::<T>(&cog.inner.nodata)?;
         let fill_value = nodata_value.unwrap_or_else(T::zero);
         let block_samples = if matches!(
             cog.inner.planar_configuration,
