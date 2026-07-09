@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- reject writer configurations that pair the horizontal predictor with float samples, the floating-point predictor with integer samples, or float sample formats below 32 bits, instead of emitting files other readers refuse
+- decode `BitsPerSample`/`SampleFormat` tags stored with nonstandard BYTE or LONG encodings instead of silently falling back to 1-bit defaults, and reject other unexpected tag types via new `Ifd::checked_bits_per_sample` / `Ifd::checked_sample_format` used by all decode paths
 - round integer overview resampling to the nearest value instead of truncating toward zero, and reject GeoTIFF/COG nodata strings that are out of range or fractional for the raster sample type instead of silently saturating the fill value
 - fix decoded YCbCr chroma scaling to honor the `ReferenceBlackWhite` chroma ranges per TIFF 6.0 (`127/(ReferenceMax - ReferenceZero)` for 8-bit samples) instead of always dividing by the full-scale range; output is unchanged for files using the default headroom-free references
 - read sparse strips and tiles (zero offset or zero byte count, as written by GDAL `SPARSE_OK=TRUE`) as implicit zero-filled blocks instead of failing with a decode error

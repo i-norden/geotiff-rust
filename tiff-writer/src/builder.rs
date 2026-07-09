@@ -725,6 +725,31 @@ impl ImageBuilder {
                 "LERC compression does not support TIFF predictors".into(),
             ));
         }
+        if matches!(self.sample_format, SampleFormat::Float) && self.bits_per_sample < 32 {
+            return Err(crate::error::Error::InvalidConfig(format!(
+                "float sample format requires 32 or 64 bits per sample, got {}",
+                self.bits_per_sample
+            )));
+        }
+        match self.predictor {
+            Predictor::Horizontal => {
+                if matches!(self.sample_format, SampleFormat::Float) {
+                    return Err(crate::error::Error::InvalidConfig(
+                        "horizontal predictor requires integer sample formats; \
+                         use Predictor::FloatingPoint for float samples"
+                            .into(),
+                    ));
+                }
+            }
+            Predictor::FloatingPoint => {
+                if !matches!(self.sample_format, SampleFormat::Float) {
+                    return Err(crate::error::Error::InvalidConfig(
+                        "floating-point predictor requires float sample formats".into(),
+                    ));
+                }
+            }
+            Predictor::None => {}
+        }
         if matches!(self.compression, Compression::OldJpeg) {
             return Err(crate::error::Error::InvalidConfig(
                 "Old-style JPEG compression is not supported for writing; use Compression::Jpeg"
@@ -1102,6 +1127,51 @@ mod tests {
             });
             assert!(result.is_ok());
         }
+    }
+
+    #[test]
+    fn validate_rejects_mismatched_predictor_and_sample_format() {
+        let err = ImageBuilder::new(4, 4)
+            .sample_type::<f32>()
+            .compression(tiff_core::Compression::Deflate)
+            .predictor(tiff_core::Predictor::Horizontal)
+            .validate()
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("horizontal predictor"))
+        );
+
+        let err = ImageBuilder::new(4, 4)
+            .sample_type::<u16>()
+            .compression(tiff_core::Compression::Deflate)
+            .predictor(tiff_core::Predictor::FloatingPoint)
+            .validate()
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("floating-point predictor"))
+        );
+
+        let err = ImageBuilder::new(4, 4)
+            .bits_per_sample(16)
+            .sample_format(tiff_core::SampleFormat::Float)
+            .validate()
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("32 or 64 bits"))
+        );
+
+        assert!(ImageBuilder::new(4, 4)
+            .sample_type::<u16>()
+            .compression(tiff_core::Compression::Deflate)
+            .predictor(tiff_core::Predictor::Horizontal)
+            .validate()
+            .is_ok());
+        assert!(ImageBuilder::new(4, 4)
+            .sample_type::<f32>()
+            .compression(tiff_core::Compression::Deflate)
+            .predictor(tiff_core::Predictor::FloatingPoint)
+            .validate()
+            .is_ok());
     }
 
     #[test]

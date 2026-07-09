@@ -4,7 +4,7 @@ use crate::error::{Error, Result};
 use crate::header::{ByteOrder, TiffHeader};
 use crate::io::Cursor;
 use crate::source::TiffSource;
-use crate::tag::{checked_tag_value_byte_len, parse_tag_bigtiff, parse_tag_classic, Tag};
+use crate::tag::{checked_tag_value_byte_len, parse_tag_bigtiff, parse_tag_classic, Tag, TagValue};
 
 pub use tiff_core::constants::{
     TAG_BITS_PER_SAMPLE, TAG_COLOR_MAP, TAG_COMPRESSION, TAG_EXTRA_SAMPLES, TAG_IMAGE_LENGTH,
@@ -130,10 +130,22 @@ impl Ifd {
     }
 
     /// Bits per sample for each channel.
+    ///
+    /// This best-effort accessor falls back to the spec default when the tag
+    /// carries an unexpected type. Use [`Self::checked_bits_per_sample`] to
+    /// surface malformed tags as errors; all decode paths do.
     pub fn bits_per_sample(&self) -> Vec<u16> {
-        self.tag(TAG_BITS_PER_SAMPLE)
-            .and_then(|tag| tag.value.as_u16_slice().map(|values| values.to_vec()))
-            .unwrap_or_else(|| vec![1])
+        self.checked_bits_per_sample().unwrap_or_else(|_| vec![1])
+    }
+
+    /// Bits per sample for each channel, validating the tag encoding.
+    ///
+    /// A missing tag defaults to `1` per the TIFF specification. SHORT
+    /// values are used directly; BYTE and LONG values written by
+    /// nonconforming writers are coerced when they fit. Any other tag type
+    /// is rejected instead of silently falling back to the default.
+    pub fn checked_bits_per_sample(&self) -> Result<Vec<u16>> {
+        self.checked_tag_u16_values(TAG_BITS_PER_SAMPLE)
     }
 
     /// Compression scheme (1 = none, 5 = LZW, 8 = Deflate, ...).
@@ -181,10 +193,46 @@ impl Ifd {
     }
 
     /// Sample format for each channel.
+    ///
+    /// This best-effort accessor falls back to the spec default when the tag
+    /// carries an unexpected type. Use [`Self::checked_sample_format`] to
+    /// surface malformed tags as errors; all decode paths do.
     pub fn sample_format(&self) -> Vec<u16> {
-        self.tag(TAG_SAMPLE_FORMAT)
-            .and_then(|tag| tag.value.as_u16_slice().map(|values| values.to_vec()))
-            .unwrap_or_else(|| vec![1])
+        self.checked_sample_format().unwrap_or_else(|_| vec![1])
+    }
+
+    /// Sample format for each channel, validating the tag encoding.
+    ///
+    /// A missing tag defaults to `1` (unsigned integer) per the TIFF
+    /// specification. SHORT values are used directly; BYTE and LONG values
+    /// written by nonconforming writers are coerced when they fit. Any other
+    /// tag type is rejected instead of silently falling back to the default.
+    pub fn checked_sample_format(&self) -> Result<Vec<u16>> {
+        self.checked_tag_u16_values(TAG_SAMPLE_FORMAT)
+    }
+
+    fn checked_tag_u16_values(&self, code: u16) -> Result<Vec<u16>> {
+        let Some(tag) = self.tag(code) else {
+            return Ok(vec![1]);
+        };
+        match &tag.value {
+            TagValue::Short(values) => Ok(values.clone()),
+            TagValue::Byte(values) => Ok(values.iter().map(|&value| u16::from(value)).collect()),
+            TagValue::Long(values) => values
+                .iter()
+                .map(|&value| {
+                    u16::try_from(value).map_err(|_| Error::InvalidTagValue {
+                        tag: code,
+                        reason: format!("value {value} does not fit in a SHORT"),
+                    })
+                })
+                .collect(),
+            _ => Err(Error::UnexpectedTagType {
+                tag: code,
+                expected: "SHORT",
+                actual: tag.tag_type.to_code(),
+            }),
+        }
     }
 
     /// Planar configuration. Defaults to chunky (1).
@@ -478,13 +526,13 @@ impl Ifd {
 
         let bits = normalize_u16_values(
             TAG_BITS_PER_SAMPLE,
-            self.bits_per_sample(),
+            self.checked_bits_per_sample()?,
             samples_per_pixel,
             1,
         )?;
         let formats = normalize_u16_values(
             TAG_SAMPLE_FORMAT,
-            self.sample_format(),
+            self.checked_sample_format()?,
             samples_per_pixel,
             1,
         )?;

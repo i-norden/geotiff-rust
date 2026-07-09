@@ -2264,6 +2264,34 @@ mod tests {
     }
 
     #[test]
+    fn accepts_long_typed_bits_per_sample_and_sample_format() {
+        // Nonconforming writers store BitsPerSample/SampleFormat as LONG.
+        let data = build_stripped_tiff(
+            1,
+            1,
+            &[0x34, 0x12],
+            &[
+                (258, 4, 1, le_u32(16).to_vec()),
+                (339, 4, 1, le_u32(1).to_vec()),
+            ],
+        );
+        let file = TiffFile::from_bytes(data).unwrap();
+        let image = file.read_image::<u16>(0).unwrap();
+        assert_eq!(image[[0, 0]], 0x1234);
+    }
+
+    #[test]
+    fn rejects_unexpected_bits_per_sample_tag_type() {
+        let data = build_stripped_tiff(1, 1, &[7], &[(258, 11, 1, 16f32.to_le_bytes().to_vec())]);
+        let file = TiffFile::from_bytes(data).unwrap();
+        let error = file.read_image_bytes(0).unwrap_err();
+        assert!(
+            matches!(error, Error::UnexpectedTagType { tag: 258, .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn ycbcr_decode_honors_reference_black_white_ranges() {
         // BT.601 video-range references: luma 16..235, chroma 128 +/- 112.
         let reference: [u32; 12] = [16, 1, 235, 1, 128, 1, 240, 1, 128, 1, 240, 1];
