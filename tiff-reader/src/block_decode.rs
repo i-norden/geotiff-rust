@@ -11,13 +11,62 @@ const LERC2_MAGIC: &[u8; 6] = b"Lerc2 ";
 const COMPRESSED_BLOCK_INPUT_RATIO: usize = 4;
 const COMPRESSED_BLOCK_INPUT_SLACK: usize = 4096;
 
-pub(crate) struct BlockDecodeRequest<'a> {
-    pub ifd: &'a Ifd,
+/// Per-IFD metadata resolved once per read so per-block decoding avoids
+/// re-deriving (and re-allocating) color-model and codec parameters.
+pub(crate) struct BlockDecodeContext<'a> {
     pub layout: RasterLayout,
     pub byte_order: ByteOrder,
+    pub compression_code: u16,
+    pub compression: Option<Compression>,
+    pub color_model: ColorModel,
+    pub lerc_additional_compression: LercAdditionalCompression,
+    pub jpeg_tables: Option<&'a [u8]>,
+}
+
+impl<'a> BlockDecodeContext<'a> {
+    pub fn new(ifd: &'a Ifd, layout: RasterLayout, byte_order: ByteOrder) -> Result<Self> {
+        Ok(Self {
+            layout,
+            byte_order,
+            compression_code: ifd.compression(),
+            compression: Compression::from_code(ifd.compression()),
+            color_model: ifd.color_model()?,
+            lerc_additional_compression: ifd
+                .lerc_parameters()?
+                .map(|params| params.additional_compression)
+                .unwrap_or(LercAdditionalCompression::None),
+            jpeg_tables: ifd
+                .tag(tiff_core::TAG_JPEG_TABLES)
+                .and_then(|tag| tag.value.as_bytes()),
+        })
+    }
+
+    fn block_samples(&self) -> usize {
+        if self.layout.planar_configuration == 1 {
+            self.layout.samples_per_pixel
+        } else {
+            1
+        }
+    }
+
+    fn is_subsampled_ycbcr_non_jpeg(&self) -> bool {
+        matches!(
+            &self.color_model,
+            ColorModel::YCbCr {
+                subsampling,
+                extra_samples,
+                ..
+            } if *subsampling != [1, 1]
+                && extra_samples.is_empty()
+                && self.compression != Some(Compression::Jpeg)
+        )
+    }
+}
+
+pub(crate) struct BlockDecodeRequest<'a> {
+    pub context: &'a BlockDecodeContext<'a>,
     pub compressed: &'a [u8],
     pub index: usize,
-    pub jpeg_tables: Option<&'a [u8]>,
     pub block_width: usize,
     pub block_height: usize,
 }
@@ -41,19 +90,15 @@ struct Lerc2Header {
 }
 
 pub(crate) fn decode_compressed_block(request: BlockDecodeRequest<'_>) -> Result<Vec<u8>> {
-    let samples = if request.layout.planar_configuration == 1 {
-        request.layout.samples_per_pixel
-    } else {
-        1
-    };
+    let samples = request.context.block_samples();
     let expected_len = expected_encoded_block_len(&request, samples)?;
 
-    if Compression::from_code(request.ifd.compression()) != Some(Compression::Lerc) {
+    if request.context.compression != Some(Compression::Lerc) {
         let mut decoded = filters::decompress(
-            request.ifd.compression(),
+            request.context.compression_code,
             request.compressed,
             request.index,
-            request.jpeg_tables,
+            request.context.jpeg_tables,
             expected_len,
         )?;
         if decoded.len() < expected_len {
@@ -68,17 +113,18 @@ pub(crate) fn decode_compressed_block(request: BlockDecodeRequest<'_>) -> Result
         if decoded.len() > expected_len {
             decoded.truncate(expected_len);
         }
-        let color_model = request.ifd.color_model()?;
-        let is_subsampled_ycbcr = is_subsampled_ycbcr_non_jpeg(request.ifd, &color_model);
+        let is_subsampled_ycbcr = request.context.is_subsampled_ycbcr_non_jpeg();
         let row_bytes = if is_subsampled_ycbcr {
             decoded.len()
-        } else if request.layout.bits_per_sample < 8 {
-            if request.layout.planar_configuration == 1 {
+        } else if request.context.layout.bits_per_sample < 8 {
+            if request.context.layout.planar_configuration == 1 {
                 request
+                    .context
                     .layout
                     .checked_packed_row_bytes_for_width(request.block_width)?
             } else {
                 request
+                    .context
                     .layout
                     .checked_packed_sample_plane_row_bytes_for_width(request.block_width)?
             }
@@ -86,33 +132,33 @@ pub(crate) fn decode_compressed_block(request: BlockDecodeRequest<'_>) -> Result
             request
                 .block_width
                 .checked_mul(samples)
-                .and_then(|value| value.checked_mul(request.layout.bytes_per_sample))
+                .and_then(|value| value.checked_mul(request.context.layout.bytes_per_sample))
                 .ok_or_else(|| Error::InvalidImageLayout("block row size overflows usize".into()))?
         };
         for row in decoded.chunks_exact_mut(row_bytes) {
             filters::fix_endianness_and_predict(
                 row,
-                request.layout.bits_per_sample,
+                request.context.layout.bits_per_sample,
                 samples as u16,
-                request.byte_order,
-                request.layout.predictor,
+                request.context.byte_order,
+                request.context.layout.predictor,
             )?;
         }
         if is_subsampled_ycbcr {
-            let ColorModel::YCbCr { subsampling, .. } = color_model else {
+            let ColorModel::YCbCr { subsampling, .. } = &request.context.color_model else {
                 unreachable!();
             };
             decoded = expand_subsampled_ycbcr(
                 &decoded,
-                request.layout.bytes_per_sample,
+                request.context.layout.bytes_per_sample,
                 request.block_width,
                 request.block_height,
-                subsampling,
+                *subsampling,
             )?;
-        } else if request.layout.bits_per_sample < 8 {
+        } else if request.context.layout.bits_per_sample < 8 {
             decoded = unpack_subbyte_block(
                 &decoded,
-                request.layout.bits_per_sample,
+                request.context.layout.bits_per_sample,
                 samples,
                 request.block_width,
                 request.block_height,
@@ -131,23 +177,18 @@ pub(crate) fn decode_compressed_block(request: BlockDecodeRequest<'_>) -> Result
 /// step changes the sample representation: sub-byte samples unpack to one
 /// byte per sample and subsampled YCbCr expands to full-resolution chroma.
 pub(crate) fn decoded_block_len(request: &BlockDecodeRequest<'_>) -> Result<usize> {
-    let samples = if request.layout.planar_configuration == 1 {
-        request.layout.samples_per_pixel
-    } else {
-        1
-    };
-    let color_model = request.ifd.color_model()?;
-    if is_subsampled_ycbcr_non_jpeg(request.ifd, &color_model) {
+    let samples = request.context.block_samples();
+    if request.context.is_subsampled_ycbcr_non_jpeg() {
         return request
             .block_width
             .checked_mul(request.block_height)
             .and_then(|pixels| pixels.checked_mul(3))
-            .and_then(|values| values.checked_mul(request.layout.bytes_per_sample))
+            .and_then(|values| values.checked_mul(request.context.layout.bytes_per_sample))
             .ok_or_else(|| {
                 Error::InvalidImageLayout("expanded YCbCr block overflows usize".into())
             });
     }
-    if request.layout.bits_per_sample < 8 {
+    if request.context.layout.bits_per_sample < 8 {
         return request
             .block_width
             .checked_mul(samples)
@@ -160,24 +201,15 @@ pub(crate) fn decoded_block_len(request: &BlockDecodeRequest<'_>) -> Result<usiz
 }
 
 pub(crate) fn compressed_block_byte_count_limit(request: &BlockDecodeRequest<'_>) -> Result<usize> {
-    let samples = if request.layout.planar_configuration == 1 {
-        request.layout.samples_per_pixel
-    } else {
-        1
-    };
+    let samples = request.context.block_samples();
     let decoded_len_limit = expected_encoded_block_len(request, samples)?;
 
-    match Compression::from_code(request.ifd.compression()) {
+    match request.context.compression {
         Some(Compression::None) => Ok(decoded_len_limit),
         Some(Compression::Lerc) => {
             let lerc_payload_len_limit =
                 expected_lerc_payload_len_limit(request, decoded_len_limit)?;
-            match request
-                .ifd
-                .lerc_parameters()?
-                .map(|params| params.additional_compression)
-                .unwrap_or(LercAdditionalCompression::None)
-            {
+            match request.context.lerc_additional_compression {
                 LercAdditionalCompression::None => Ok(lerc_payload_len_limit),
                 LercAdditionalCompression::Deflate | LercAdditionalCompression::Zstd => {
                     compressed_input_len_limit(lerc_payload_len_limit)
@@ -189,9 +221,8 @@ pub(crate) fn compressed_block_byte_count_limit(request: &BlockDecodeRequest<'_>
 }
 
 fn expected_encoded_block_len(request: &BlockDecodeRequest<'_>, samples: usize) -> Result<usize> {
-    let color_model = request.ifd.color_model()?;
-    if is_subsampled_ycbcr_non_jpeg(request.ifd, &color_model) {
-        let ColorModel::YCbCr { subsampling, .. } = color_model else {
+    if request.context.is_subsampled_ycbcr_non_jpeg() {
+        let ColorModel::YCbCr { subsampling, .. } = &request.context.color_model else {
             unreachable!();
         };
         let units_across = request.block_width.div_ceil(subsampling[0] as usize);
@@ -203,17 +234,19 @@ fn expected_encoded_block_len(request: &BlockDecodeRequest<'_>, samples: usize) 
         return units_across
             .checked_mul(units_down)
             .and_then(|units| units.checked_mul(samples_per_unit))
-            .and_then(|values| values.checked_mul(request.layout.bytes_per_sample))
+            .and_then(|values| values.checked_mul(request.context.layout.bytes_per_sample))
             .ok_or_else(|| Error::InvalidImageLayout("YCbCr block size overflows usize".into()));
     }
 
-    let row_bytes = if request.layout.bits_per_sample < 8 {
-        if request.layout.planar_configuration == 1 {
+    let row_bytes = if request.context.layout.bits_per_sample < 8 {
+        if request.context.layout.planar_configuration == 1 {
             request
+                .context
                 .layout
                 .checked_packed_row_bytes_for_width(request.block_width)?
         } else {
             request
+                .context
                 .layout
                 .checked_packed_sample_plane_row_bytes_for_width(request.block_width)?
         }
@@ -221,26 +254,13 @@ fn expected_encoded_block_len(request: &BlockDecodeRequest<'_>, samples: usize) 
         request
             .block_width
             .checked_mul(samples)
-            .and_then(|value| value.checked_mul(request.layout.bytes_per_sample))
+            .and_then(|value| value.checked_mul(request.context.layout.bytes_per_sample))
             .ok_or_else(|| Error::InvalidImageLayout("block row size overflows usize".into()))?
     };
     request
         .block_height
         .checked_mul(row_bytes)
         .ok_or_else(|| Error::InvalidImageLayout("block size overflows usize".into()))
-}
-
-fn is_subsampled_ycbcr_non_jpeg(ifd: &Ifd, color_model: &ColorModel) -> bool {
-    matches!(
-        color_model,
-        ColorModel::YCbCr {
-            subsampling,
-            extra_samples,
-            ..
-        } if *subsampling != [1, 1]
-            && extra_samples.is_empty()
-            && Compression::from_code(ifd.compression()) != Some(Compression::Jpeg)
-    )
 }
 
 fn unpack_subbyte_block(
@@ -374,12 +394,7 @@ fn expand_subsampled_ycbcr(
 
 fn decode_lerc_block(request: BlockDecodeRequest<'_>, expected_len: usize) -> Result<Vec<u8>> {
     let lerc_payload_len_limit = expected_lerc_payload_len_limit(&request, expected_len)?;
-    let payload = match request
-        .ifd
-        .lerc_parameters()?
-        .map(|params| params.additional_compression)
-        .unwrap_or(LercAdditionalCompression::None)
-    {
+    let payload = match request.context.lerc_additional_compression {
         LercAdditionalCompression::None => {
             if request.compressed.len() > lerc_payload_len_limit {
                 return Err(Error::DecompressionFailed {
@@ -410,7 +425,7 @@ fn decode_lerc_block(request: BlockDecodeRequest<'_>, expected_len: usize) -> Re
 
     validate_lerc_payload_before_decode(
         &payload,
-        request.layout,
+        request.context.layout,
         request.block_width,
         request.block_height,
         request.index,
@@ -422,23 +437,24 @@ fn decode_lerc_block(request: BlockDecodeRequest<'_>, expected_len: usize) -> Re
         })?;
     validate_lerc_layout(
         &decoded,
-        request.layout,
+        request.context.layout,
         request.block_width,
         request.block_height,
         request.index,
     )?;
-    serialize_lerc_band_set(&decoded, request.layout, expected_len, request.index)
+    serialize_lerc_band_set(
+        &decoded,
+        request.context.layout,
+        expected_len,
+        request.index,
+    )
 }
 
 fn expected_lerc_payload_len_limit(
     request: &BlockDecodeRequest<'_>,
     expected_len: usize,
 ) -> Result<usize> {
-    let samples = if request.layout.planar_configuration == 1 {
-        request.layout.samples_per_pixel
-    } else {
-        1
-    };
+    let samples = request.context.block_samples();
     let pixel_count = request
         .block_width
         .checked_mul(request.block_height)
