@@ -1007,7 +1007,7 @@ impl CogBuilder {
             }
         }
 
-        images[0].blocks = spool_tiled_data_3d(&mut spool, data, plan)?;
+        images[0].blocks = spool_tiled_data_3d(&mut spool, data, fill_value, plan)?;
 
         let base_offset = sink.stream_position()?;
         let layout = plan_cog_layout(
@@ -1624,6 +1624,7 @@ fn spool_base_blocks_from_store<T: NumericSample>(
 fn spool_tiled_data_3d<T: NumericSample>(
     spool: &mut BlockSpool,
     data: ArrayView3<T>,
+    fill_value: T,
     plan: TileWritePlan,
 ) -> Result<Vec<CogBlockRecord>> {
     let (height, width, bands) = data.dim();
@@ -1659,7 +1660,7 @@ fn spool_tiled_data_3d<T: NumericSample>(
                 for tile_col in 0..tiles_across {
                     let tile_index = tile_row * tiles_across + tile_col;
                     let block_index = band * tiles_per_plane + tile_index;
-                    let mut tile_data = vec![T::zero(); tw * th];
+                    let mut tile_data = vec![fill_value; tw * th];
                     for row in 0..th {
                         let src_row = tile_row * th + row;
                         if src_row >= height {
@@ -1694,7 +1695,7 @@ fn spool_tiled_data_3d<T: NumericSample>(
         for tile_row in 0..tiles_down {
             for tile_col in 0..tiles_across {
                 let block_index = tile_row * tiles_across + tile_col;
-                let mut tile_data = vec![T::zero(); tw * th * bands];
+                let mut tile_data = vec![fill_value; tw * th * bands];
                 for row in 0..th {
                     let src_row = tile_row * th + row;
                     if src_row >= height {
