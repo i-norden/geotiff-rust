@@ -135,13 +135,15 @@ pub(crate) fn decode_compressed_block(request: BlockDecodeRequest<'_>) -> Result
                 .and_then(|value| value.checked_mul(request.context.layout.bytes_per_sample))
                 .ok_or_else(|| Error::InvalidImageLayout("block row size overflows usize".into()))?
         };
+        let mut predictor_scratch = Vec::new();
         for row in decoded.chunks_exact_mut(row_bytes) {
-            filters::fix_endianness_and_predict(
+            filters::fix_endianness_and_predict_with_scratch(
                 row,
                 request.context.layout.bits_per_sample,
                 samples as u16,
                 request.context.byte_order,
                 request.context.layout.predictor,
+                &mut predictor_scratch,
             )?;
         }
         if is_subsampled_ycbcr {
