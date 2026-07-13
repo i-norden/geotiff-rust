@@ -2360,6 +2360,14 @@ mod tests {
     }
 
     #[test]
+    fn non_lerc_read_ignores_irrelevant_lerc_parameters() {
+        let data = build_stripped_tiff(1, 1, &[9], &[(50674, 3, 1, inline_short(1))]);
+        let file = TiffFile::from_bytes(data).unwrap();
+        let image = file.read_image::<u8>(0).unwrap();
+        assert_eq!(image.into_raw_vec_and_offset().0, vec![9]);
+    }
+
+    #[test]
     fn reads_lerc_masked_f32_strip_as_nan() {
         let mask = [1u8, 0, 1, 1];
         let encoded_mask = encode_mask_rle(&mask);

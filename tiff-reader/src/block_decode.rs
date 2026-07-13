@@ -25,16 +25,21 @@ pub(crate) struct BlockDecodeContext<'a> {
 
 impl<'a> BlockDecodeContext<'a> {
     pub fn new(ifd: &'a Ifd, layout: RasterLayout, byte_order: ByteOrder) -> Result<Self> {
+        let compression_code = ifd.compression();
+        let compression = Compression::from_code(compression_code);
         Ok(Self {
             layout,
             byte_order,
-            compression_code: ifd.compression(),
-            compression: Compression::from_code(ifd.compression()),
+            compression_code,
+            compression,
             color_model: ifd.color_model()?,
-            lerc_additional_compression: ifd
-                .lerc_parameters()?
-                .map(|params| params.additional_compression)
-                .unwrap_or(LercAdditionalCompression::None),
+            lerc_additional_compression: if compression == Some(Compression::Lerc) {
+                ifd.lerc_parameters()?
+                    .map(|params| params.additional_compression)
+                    .unwrap_or(LercAdditionalCompression::None)
+            } else {
+                LercAdditionalCompression::None
+            },
             jpeg_tables: ifd
                 .tag(tiff_core::TAG_JPEG_TABLES)
                 .and_then(|tag| tag.value.as_bytes()),
