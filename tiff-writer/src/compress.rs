@@ -41,6 +41,8 @@ pub fn compress_block<T: TiffWriteSample>(
         deflate_level,
     } = options;
 
+    validate_deflate_level(compression, deflate_level, index)?;
+
     if matches!(compression, Compression::Jpeg) {
         return compress_block_jpeg(
             samples,
@@ -154,6 +156,7 @@ pub fn compress_with_level(
     deflate_level: Option<u32>,
     index: usize,
 ) -> Result<Vec<u8>> {
+    validate_deflate_level(compression, deflate_level, index)?;
     match compression {
         Compression::None => Ok(data.to_vec()),
         Compression::Lzw => compress_lzw(data, index),
@@ -181,6 +184,31 @@ pub fn compress_with_level(
             reason: format!("compression {:?} is not supported for writing", other),
         }),
     }
+}
+
+fn validate_deflate_level(
+    compression: Compression,
+    deflate_level: Option<u32>,
+    index: usize,
+) -> Result<()> {
+    let Some(level) = deflate_level else {
+        return Ok(());
+    };
+    if level > 9 {
+        return Err(Error::CompressionFailed {
+            index,
+            reason: format!("Deflate compression level must be 0-9, got {level}"),
+        });
+    }
+    if !matches!(compression, Compression::Deflate | Compression::DeflateOld) {
+        return Err(Error::CompressionFailed {
+            index,
+            reason: format!(
+                "Deflate compression level requires Deflate compression, got {compression:?}"
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Full LERC compression pipeline: typed samples → LERC2 blob → optional additional compression.
@@ -508,6 +536,23 @@ mod tests {
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed).unwrap();
         assert_eq!(decompressed, data);
+    }
+
+    #[test]
+    fn explicit_deflate_level_rejects_invalid_configuration() {
+        let error = compress_with_level(&[1, 2, 3], Compression::Deflate, Some(10), 7).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::CompressionFailed { index: 7, reason }
+                if reason.contains("must be 0-9")
+        ));
+
+        let error = compress_with_level(&[1, 2, 3], Compression::Lzw, Some(6), 8).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::CompressionFailed { index: 8, reason }
+                if reason.contains("requires Deflate compression")
+        ));
     }
 
     #[cfg(feature = "zstd")]
