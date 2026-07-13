@@ -2336,6 +2336,38 @@ mod tests {
         assert_eq!(values, rgb);
     }
 
+    #[cfg(feature = "webp")]
+    #[test]
+    fn rejects_webp_payload_dimensions_that_do_not_match_tile() {
+        let rgb = vec![17u8; 8 * 32 * 3];
+        let mut webp = Vec::new();
+        image_webp::WebPEncoder::new(&mut webp)
+            .encode(&rgb, 8, 32, image_webp::ColorType::Rgb8)
+            .unwrap();
+
+        let data = build_tiled_tiff_with_overrides(
+            16,
+            16,
+            16,
+            16,
+            &[&webp],
+            &[
+                (
+                    258,
+                    3,
+                    3,
+                    [8u16, 8, 8].into_iter().flat_map(le_u16).collect(),
+                ),
+                (259, 3, 1, inline_short(50001)),
+                (262, 3, 1, inline_short(2)),
+                (277, 3, 1, inline_short(3)),
+            ],
+        );
+        let file = TiffFile::from_bytes(data).unwrap();
+        let error = file.read_image::<u8>(0).unwrap_err();
+        assert!(error.to_string().contains("dimensions 8x32"), "{error}");
+    }
+
     #[test]
     fn ycbcr_decode_honors_reference_black_white_ranges() {
         // BT.601 video-range references: luma 16..235, chroma 128 +/- 112.

@@ -4,6 +4,7 @@
 
 Breaking changes:
 
+- raise the minimum supported Rust version from 1.77 to 1.85
 - remove the `ImageBuilder` helpers deprecated since 0.6.0 (`block_count`, `block_sample_count`, `estimated_uncompressed_bytes`, `layout_tags`, `build_tags`); use the `checked_*` equivalents
 - collapse duplicate reader methods: `read_*_samples` and `read_*_sample_bytes` aliases fold into `read_image` / `read_window` / `read_band*` and the `*_bytes` variants on `TiffFile` and `GeoTiffFile`
 - `Ifd::rows_per_strip` returns `u32` (it always resolved to a value); `Ifd::bits_per_sample` / `Ifd::sample_format` are now the validating `Result` accessors introduced in this release
