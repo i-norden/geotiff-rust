@@ -13,7 +13,7 @@ use std::time::Duration;
 use lru::LruCache;
 use parking_lot::Mutex;
 use reqwest::header::{HeaderMap, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, RequestBuilder, StatusCode};
 use tiff_reader::source::{SharedSource, TiffSource};
 use tiff_reader::{OpenOptions as TiffOpenOptions, TiffFile, TiffSample};
 use tokio::runtime::Handle;
@@ -235,6 +235,7 @@ struct AsyncHttpRangeSource {
     len: u64,
     chunk_size: usize,
     headers: HeaderMap,
+    request_timeout: Option<Duration>,
     cache: Mutex<RangeCacheState>,
     max_bytes: usize,
     cache_enabled: bool,
@@ -260,7 +261,8 @@ impl AsyncHttpRangeSource {
                 builder.build()?
             }
         };
-        let len = probe_content_length(&client, &url, &options.headers).await?;
+        let len =
+            probe_content_length(&client, &url, &options.headers, options.request_timeout).await?;
         let slots = NonZeroUsize::new(options.cache_slots.max(1)).unwrap();
         Ok(Self {
             client,
@@ -268,6 +270,7 @@ impl AsyncHttpRangeSource {
             len,
             chunk_size: options.chunk_size.max(1),
             headers: options.headers,
+            request_timeout: options.request_timeout,
             cache: Mutex::new(RangeCacheState {
                 cache: LruCache::new(slots),
                 current_bytes: 0,
@@ -295,14 +298,15 @@ impl AsyncHttpRangeSource {
             )));
         }
         let end = start.saturating_add(chunk_size).min(self.len) - 1;
-        let response = self
-            .client
-            .get(&self.url)
-            .headers(self.headers.clone())
-            .header(RANGE, format!("bytes={start}-{end}"))
-            .send()
-            .await?
-            .error_for_status()?;
+        let response = request_with_options(
+            self.client.get(&self.url),
+            &self.headers,
+            self.request_timeout,
+        )
+        .header(RANGE, format!("bytes={start}-{end}"))
+        .send()
+        .await?
+        .error_for_status()?;
         if response.status() != StatusCode::PARTIAL_CONTENT {
             return Err(Error::Other(format!(
                 "server did not honor byte-range request for {}: expected 206, got {}",
@@ -321,15 +325,12 @@ impl AsyncHttpRangeSource {
             Some(self.len),
         )?;
         let expected_len = usize::try_from(end - start + 1).unwrap_or(usize::MAX);
-        let body = response.bytes().await?;
-        if body.len() != expected_len {
-            return Err(Error::Other(format!(
-                "range response length mismatch for {}: expected {expected_len} bytes, got {}",
-                self.url,
-                body.len()
-            )));
-        }
-        let body = body.to_vec();
+        let body = read_response_body_bounded(
+            response,
+            expected_len,
+            &format!("{} bytes={start}-{end}", self.url),
+        )
+        .await?;
         let body_len = body.len();
         let value = Arc::new(body);
 
@@ -400,8 +401,65 @@ impl AsyncHttpRangeSource {
     }
 }
 
-async fn probe_content_length(client: &Client, url: &str, headers: &HeaderMap) -> Result<u64> {
-    let head = client.head(url).headers(headers.clone()).send().await?;
+fn request_with_options(
+    request: RequestBuilder,
+    headers: &HeaderMap,
+    request_timeout: Option<Duration>,
+) -> RequestBuilder {
+    let mut request = if headers.is_empty() {
+        request
+    } else {
+        request.headers(headers.clone())
+    };
+    if let Some(timeout) = request_timeout {
+        request = request.timeout(timeout);
+    }
+    request
+}
+
+async fn read_response_body_bounded(
+    mut response: reqwest::Response,
+    expected_len: usize,
+    context: &str,
+) -> Result<Vec<u8>> {
+    if let Some(content_len) = response.content_length() {
+        let expected_len_u64 = u64::try_from(expected_len).unwrap_or(u64::MAX);
+        if content_len > expected_len_u64 {
+            return Err(Error::Other(format!(
+                "HTTP response body for {context} exceeds the expected {expected_len}-byte range"
+            )));
+        }
+    }
+
+    let mut body = Vec::with_capacity(expected_len);
+    while let Some(chunk) = response.chunk().await? {
+        let remaining = expected_len - body.len();
+        if chunk.len() > remaining {
+            return Err(Error::Other(format!(
+                "HTTP response body for {context} exceeds the expected {expected_len}-byte range"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    if body.len() != expected_len {
+        return Err(Error::Other(format!(
+            "range response length mismatch for {context}: expected {expected_len} bytes, got {}",
+            body.len()
+        )));
+    }
+    Ok(body)
+}
+
+async fn probe_content_length(
+    client: &Client,
+    url: &str,
+    headers: &HeaderMap,
+    request_timeout: Option<Duration>,
+) -> Result<u64> {
+    let head = request_with_options(client.head(url), headers, request_timeout)
+        .send()
+        .await?;
     if head.status().is_success() {
         if let Some(len) = head
             .headers()
@@ -413,9 +471,7 @@ async fn probe_content_length(client: &Client, url: &str, headers: &HeaderMap) -
         }
     }
 
-    let response = client
-        .get(url)
-        .headers(headers.clone())
+    let response = request_with_options(client.get(url), headers, request_timeout)
         .header(RANGE, "bytes=0-0")
         .send()
         .await?
@@ -435,7 +491,11 @@ async fn probe_content_length(client: &Client, url: &str, headers: &HeaderMap) -
 
 #[cfg(test)]
 mod tests {
-    use super::{AsyncHttpGeoTiffFile, AsyncHttpOpenOptions};
+    use std::time::{Duration, Instant};
+
+    use reqwest::Client;
+
+    use super::{AsyncHttpGeoTiffFile, AsyncHttpOpenOptions, AsyncHttpRangeSource};
     use crate::http_test_support::{build_simple_geotiff, TestServer};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -499,5 +559,51 @@ mod tests {
         assert!(requests
             .iter()
             .any(|request| request.to_ascii_lowercase().contains("x-test-auth: secret")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn custom_async_client_honors_request_timeout() {
+        let delay = Duration::from_millis(500);
+        let Some(server) = TestServer::start_with_response_delay(vec![0; 12], delay) else {
+            return;
+        };
+        let started = Instant::now();
+        let result = AsyncHttpGeoTiffFile::open_with_options(
+            server.url(),
+            AsyncHttpOpenOptions {
+                request_timeout: Some(Duration::from_millis(30)),
+                client: Some(Client::builder().build().unwrap()),
+                ..AsyncHttpOpenOptions::default()
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(started.elapsed() < delay, "custom client ignored timeout");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_range_read_rejects_oversized_body_before_buffering_it() {
+        let Some(server) =
+            TestServer::start_with_range_body_suffix(vec![0; 12], vec![1; 1024 * 1024])
+        else {
+            return;
+        };
+        let source = AsyncHttpRangeSource::open(
+            server.url(),
+            AsyncHttpOpenOptions {
+                chunk_size: 4,
+                cache_bytes: 0,
+                cache_slots: 0,
+                ..AsyncHttpOpenOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let error = source.chunk(0).await.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("exceeds the expected 4-byte range"));
     }
 }

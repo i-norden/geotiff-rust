@@ -107,9 +107,28 @@ impl TestServer {
         Self::start_with_content_range_offset(bytes, 0)
     }
 
+    #[cfg(feature = "cog-async")]
+    pub(crate) fn start_with_response_delay(bytes: Vec<u8>, delay: Duration) -> Option<Self> {
+        Self::start_configured(bytes, 0, Some(delay), Vec::new())
+    }
+
+    #[cfg(feature = "cog-async")]
+    pub(crate) fn start_with_range_body_suffix(bytes: Vec<u8>, suffix: Vec<u8>) -> Option<Self> {
+        Self::start_configured(bytes, 0, None, suffix)
+    }
+
     pub(crate) fn start_with_content_range_offset(
         bytes: Vec<u8>,
         content_range_offset: usize,
+    ) -> Option<Self> {
+        Self::start_configured(bytes, content_range_offset, None, Vec::new())
+    }
+
+    fn start_configured(
+        bytes: Vec<u8>,
+        content_range_offset: usize,
+        response_delay: Option<Duration>,
+        range_body_suffix: Vec<u8>,
     ) -> Option<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").ok()?;
         listener.set_nonblocking(true).ok()?;
@@ -127,6 +146,9 @@ impl TestServer {
                             continue;
                         };
                         requests_worker.lock().unwrap().push(request);
+                        if let Some(delay) = response_delay {
+                            thread::sleep(delay);
+                        }
 
                         if request_line.starts_with("HEAD ") {
                             let response = format!(
@@ -139,17 +161,19 @@ impl TestServer {
 
                         if let Some((start, end)) = range {
                             let body = &bytes[start..=end];
+                            let response_len = body.len() + range_body_suffix.len();
                             let reported_start = start.saturating_add(content_range_offset);
                             let reported_end = end.saturating_add(content_range_offset);
                             let response = format!(
                                     "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
-                                    body.len(),
+                                    response_len,
                                     reported_start,
                                     reported_end,
                                     bytes.len()
                                 );
                             let _ = stream.write_all(response.as_bytes());
                             let _ = stream.write_all(body);
+                            let _ = stream.write_all(&range_body_suffix);
                         } else {
                             let response = format!(
                                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
