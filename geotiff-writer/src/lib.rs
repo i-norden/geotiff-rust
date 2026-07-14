@@ -21,6 +21,7 @@
 pub mod builder;
 pub mod cog;
 pub mod error;
+mod raster_copy;
 pub mod sample;
 pub mod tile_writer;
 
