@@ -673,3 +673,54 @@ fn explicit_bigtiff_roundtrips_small_images() {
     assert_eq!(offset, Some(0));
     assert_eq!(values, vec![1, 2, 3, 4]);
 }
+
+#[test]
+fn deflate_level_controls_output_size_and_roundtrips() {
+    use std::io::Cursor;
+    use tiff_writer::{TiffWriter, WriteOptions};
+
+    let samples: Vec<u16> = (0..64 * 64)
+        .map(|index| ((index / 7) % 500) as u16)
+        .collect();
+
+    let mut sizes = Vec::new();
+    for level in [1u32, 9] {
+        let mut writer = TiffWriter::new(Cursor::new(Vec::new()), WriteOptions::default()).unwrap();
+        let handle = writer
+            .add_image(
+                ImageBuilder::new(64, 64)
+                    .sample_type::<u16>()
+                    .compression(Compression::Deflate)
+                    .deflate_level(level)
+                    .strips(64),
+            )
+            .unwrap();
+        writer.write_block(&handle, 0, &samples).unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+
+        let file = tiff_reader::TiffFile::from_bytes(bytes.clone()).unwrap();
+        let decoded = file.read_image::<u16>(0).unwrap();
+        assert_eq!(decoded.into_raw_vec_and_offset().0, samples);
+        sizes.push(bytes.len());
+    }
+    assert!(
+        sizes[1] <= sizes[0],
+        "level 9 output ({}) should not exceed level 1 output ({})",
+        sizes[1],
+        sizes[0]
+    );
+
+    let err = ImageBuilder::new(16, 16)
+        .compression(Compression::Deflate)
+        .deflate_level(12)
+        .validate()
+        .unwrap_err();
+    assert!(err.to_string().contains("deflate_level"), "{err}");
+
+    let err = ImageBuilder::new(16, 16)
+        .compression(Compression::Lzw)
+        .deflate_level(6)
+        .validate()
+        .unwrap_err();
+    assert!(err.to_string().contains("Deflate compression"), "{err}");
+}

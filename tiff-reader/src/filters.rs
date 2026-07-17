@@ -287,8 +287,8 @@ fn read_bounded_to_end<R: Read>(
 ) -> Result<Vec<u8>> {
     let probe_limit = decoded_len_probe_limit(index, codec, decoded_len_limit)?;
     let mut reader = reader.take(probe_limit as u64);
-    let mut out = Vec::with_capacity(decoded_len_limit.min(8192));
-    let mut scratch = [0u8; 8192];
+    let mut out = Vec::with_capacity(decoded_len_limit.min(64 * 1024));
+    let mut scratch = vec![0u8; probe_limit.min(64 * 1024)];
 
     loop {
         let remaining = probe_limit.saturating_sub(out.len());

@@ -17,7 +17,7 @@ tiff-core = { version = "0.7.0", path = "../tiff-core" }
 lerc-core = { workspace = true }
 lerc-writer = { workspace = true }
 thiserror = { workspace = true }
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+flate2 = { version = "1.0.35", default-features = false, features = ["zlib-rs"] }
 weezl = "0.1"
 
 [features]

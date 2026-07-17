@@ -21,6 +21,8 @@ pub struct BlockEncodingOptions<'a> {
     pub samples_per_pixel: u16,
     pub row_width_pixels: usize,
     pub jpeg_options: Option<&'a JpegOptions>,
+    /// Deflate level (0-9) for `Deflate`/`DeflateOld`; `None` uses the codec default.
+    pub deflate_level: Option<u32>,
 }
 
 /// Full compression pipeline: native samples → file-order bytes → predictor → compress.
@@ -36,7 +38,10 @@ pub fn compress_block<T: TiffWriteSample>(
         samples_per_pixel,
         row_width_pixels,
         jpeg_options,
+        deflate_level,
     } = options;
+
+    validate_deflate_level(compression, deflate_level, index)?;
 
     if matches!(compression, Compression::Jpeg) {
         return compress_block_jpeg(
@@ -61,7 +66,7 @@ pub fn compress_block<T: TiffWriteSample>(
             )?;
         }
     }
-    compress(&encoded, compression, index)
+    compress_with_level(&encoded, compression, deflate_level, index)
 }
 
 #[cfg(feature = "jpeg")]
@@ -141,10 +146,23 @@ fn compress_block_jpeg<T: TiffWriteSample>(
 /// LERC compression operates on typed samples, not raw bytes. Use
 /// [`compress_block_lerc`] for LERC encoding.
 pub fn compress(data: &[u8], compression: Compression, index: usize) -> Result<Vec<u8>> {
+    compress_with_level(data, compression, None, index)
+}
+
+/// [`compress`] with an explicit Deflate level (0-9) for Deflate blocks.
+pub fn compress_with_level(
+    data: &[u8],
+    compression: Compression,
+    deflate_level: Option<u32>,
+    index: usize,
+) -> Result<Vec<u8>> {
+    validate_deflate_level(compression, deflate_level, index)?;
     match compression {
         Compression::None => Ok(data.to_vec()),
         Compression::Lzw => compress_lzw(data, index),
-        Compression::Deflate | Compression::DeflateOld => compress_deflate(data, index),
+        Compression::Deflate | Compression::DeflateOld => {
+            compress_deflate_with_level(data, deflate_level, index)
+        }
         #[cfg(feature = "jpeg")]
         Compression::Jpeg => Err(Error::CompressionFailed {
             index,
@@ -166,6 +184,31 @@ pub fn compress(data: &[u8], compression: Compression, index: usize) -> Result<V
             reason: format!("compression {:?} is not supported for writing", other),
         }),
     }
+}
+
+fn validate_deflate_level(
+    compression: Compression,
+    deflate_level: Option<u32>,
+    index: usize,
+) -> Result<()> {
+    let Some(level) = deflate_level else {
+        return Ok(());
+    };
+    if level > 9 {
+        return Err(Error::CompressionFailed {
+            index,
+            reason: format!("Deflate compression level must be 0-9, got {level}"),
+        });
+    }
+    if !matches!(compression, Compression::Deflate | Compression::DeflateOld) {
+        return Err(Error::CompressionFailed {
+            index,
+            reason: format!(
+                "Deflate compression level requires Deflate compression, got {compression:?}"
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Full LERC compression pipeline: typed samples → LERC2 blob → optional additional compression.
@@ -391,10 +434,15 @@ fn compress_lzw(data: &[u8], index: usize) -> Result<Vec<u8>> {
 }
 
 fn compress_deflate(data: &[u8], index: usize) -> Result<Vec<u8>> {
+    compress_deflate_with_level(data, None, index)
+}
+
+fn compress_deflate_with_level(data: &[u8], level: Option<u32>, index: usize) -> Result<Vec<u8>> {
     use flate2::write::ZlibEncoder;
     use std::io::Write;
 
-    let mut encoder = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    let level = level.map_or_else(flate2::Compression::default, flate2::Compression::new);
+    let mut encoder = ZlibEncoder::new(Vec::new(), level);
     encoder
         .write_all(data)
         .map_err(|e| Error::CompressionFailed {
@@ -488,6 +536,23 @@ mod tests {
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed).unwrap();
         assert_eq!(decompressed, data);
+    }
+
+    #[test]
+    fn explicit_deflate_level_rejects_invalid_configuration() {
+        let error = compress_with_level(&[1, 2, 3], Compression::Deflate, Some(10), 7).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::CompressionFailed { index: 7, reason }
+                if reason.contains("must be 0-9")
+        ));
+
+        let error = compress_with_level(&[1, 2, 3], Compression::Lzw, Some(6), 8).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::CompressionFailed { index: 8, reason }
+                if reason.contains("requires Deflate compression")
+        ));
     }
 
     #[cfg(feature = "zstd")]

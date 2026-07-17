@@ -55,6 +55,7 @@ pub struct GeoTiffBuilder {
     pub(crate) predictor: Predictor,
     pub(crate) lerc_options: Option<tiff_writer::LercOptions>,
     pub(crate) jpeg_options: Option<JpegOptions>,
+    pub(crate) deflate_level: Option<u32>,
     pub(crate) extra_samples: Vec<ExtraSample>,
     pub(crate) color_map: Option<ColorMap>,
     pub(crate) ink_set: Option<InkSet>,
@@ -85,6 +86,7 @@ impl GeoTiffBuilder {
             predictor: Predictor::None,
             lerc_options: None,
             jpeg_options: None,
+            deflate_level: None,
             extra_samples: Vec::new(),
             color_map: None,
             ink_set: None,
@@ -294,6 +296,15 @@ impl GeoTiffBuilder {
         if matches!(compression, Compression::Lerc | Compression::Jpeg) {
             self.predictor = Predictor::None;
         }
+        self
+    }
+
+    /// Set the Deflate compression level (0-9).
+    ///
+    /// Applies to `Compression::Deflate` output. The additional Deflate layer
+    /// of `LERC+Deflate` always uses the codec default level.
+    pub fn deflate_level(mut self, level: u32) -> Self {
+        self.deflate_level = Some(level);
         self
     }
 
@@ -579,6 +590,9 @@ impl GeoTiffBuilder {
         }
         if let Some(opts) = self.jpeg_options {
             ib = ib.jpeg_options(opts);
+        }
+        if let Some(level) = self.deflate_level {
+            ib = ib.deflate_level(level);
         }
 
         if let (Some(tw), Some(th)) = (self.tile_width, self.tile_height) {

@@ -217,6 +217,7 @@ impl<W: Write + Seek> TiffWriter<W> {
                     samples_per_pixel: state.builder.block_samples_per_pixel(),
                     row_width_pixels: state.builder.block_row_width(),
                     jpeg_options: state.builder.jpeg_options.as_ref(),
+                    deflate_level: state.builder.deflate_level,
                 },
                 block_index,
             )?

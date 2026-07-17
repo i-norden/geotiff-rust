@@ -70,6 +70,7 @@ pub struct ImageBuilder {
     pub(crate) subfile_type: u32,
     pub(crate) lerc_options: Option<LercOptions>,
     pub(crate) jpeg_options: Option<JpegOptions>,
+    pub(crate) deflate_level: Option<u32>,
 }
 
 impl ImageBuilder {
@@ -97,6 +98,7 @@ impl ImageBuilder {
             subfile_type: 0,
             lerc_options: None,
             jpeg_options: None,
+            deflate_level: None,
         }
     }
 
@@ -142,6 +144,16 @@ impl ImageBuilder {
         if !matches!(self.compression, Compression::Lerc | Compression::Jpeg) {
             self.predictor = p;
         }
+        self
+    }
+
+    /// Set the Deflate compression level (0-9).
+    ///
+    /// Applies to `Compression::Deflate`/`Compression::DeflateOld` blocks.
+    /// The additional Deflate layer of `LERC+Deflate` always uses the codec
+    /// default level.
+    pub fn deflate_level(mut self, level: u32) -> Self {
+        self.deflate_level = Some(level);
         self
     }
 
@@ -755,6 +767,21 @@ impl ImageBuilder {
                 "Old-style JPEG compression is not supported for writing; use Compression::Jpeg"
                     .into(),
             ));
+        }
+        if let Some(level) = self.deflate_level {
+            if level > 9 {
+                return Err(crate::error::Error::InvalidConfig(format!(
+                    "deflate_level must be 0-9, got {level}"
+                )));
+            }
+            if !matches!(
+                self.compression,
+                Compression::Deflate | Compression::DeflateOld
+            ) {
+                return Err(crate::error::Error::InvalidConfig(
+                    "deflate_level requires Deflate compression".into(),
+                ));
+            }
         }
         self.validate_color_model()?;
         if matches!(self.compression, Compression::Jpeg) {
