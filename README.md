@@ -44,6 +44,11 @@ YCbCr, or CMYK) instead of storage-domain samples.
 Use `read_band` / `read_band_window` on `GeoTiffFile` and `TiffFile` when
 you only need one storage-domain band as a `[rows, cols]` array.
 
+Enable the non-default `f16` feature on the reader or writer crate to use
+`half::f16` rasters. These files use TIFF `SampleFormat=Float` with
+`BitsPerSample=16`; byte order, Deflate/LZW/ZSTD compression, and the
+floating-point predictor are supported, while JPEG and LERC are not.
+
 ## Writing
 
 ```rust

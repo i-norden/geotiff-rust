@@ -52,6 +52,10 @@ impl_tiff_sample!(u32, 1, 32, 4, |chunk: &[u8]| u32::from_ne_bytes(
 impl_tiff_sample!(i32, 2, 32, 4, |chunk: &[u8]| i32::from_ne_bytes(
     chunk.try_into().unwrap()
 ));
+#[cfg(feature = "f16")]
+impl_tiff_sample!(half::f16, 3, 16, 2, |chunk: &[u8]| {
+    half::f16::from_bits(u16::from_ne_bytes(chunk.try_into().unwrap()))
+});
 impl_tiff_sample!(f32, 3, 32, 4, |chunk: &[u8]| f32::from_ne_bytes(
     chunk.try_into().unwrap()
 ));

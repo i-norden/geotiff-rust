@@ -104,6 +104,28 @@ impl_numeric_sample_int!(u32);
 impl_numeric_sample_int!(i32);
 impl_numeric_sample_int!(u64);
 impl_numeric_sample_int!(i64);
+#[cfg(feature = "f16")]
+impl NumericSample for half::f16 {
+    fn zero() -> Self {
+        half::f16::ZERO
+    }
+
+    fn to_f64(self) -> f64 {
+        half::f16::to_f64(self)
+    }
+
+    fn from_f64(value: f64) -> Self {
+        half::f16::from_f64(value)
+    }
+
+    fn try_from_f64(value: f64) -> Option<Self> {
+        let converted = half::f16::from_f64(value);
+        if value.is_finite() && !converted.is_finite() {
+            return None;
+        }
+        Some(converted)
+    }
+}
 impl_numeric_sample_float!(f32);
 impl_numeric_sample_float!(f64);
 

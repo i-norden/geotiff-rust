@@ -18,7 +18,7 @@ pub trait TiffWriteSample: tiff_core::TiffSample + Copy + Send + Sync {
     ///
     /// For LERC-compatible types (i8, u8, i16, u16, i32, u32, f32, f64) this
     /// delegates to the `lerc-writer` crate. For types not supported by LERC
-    /// (u64, i64), this returns an error.
+    /// (`half::f16`, u64, i64), this returns an error.
     fn lerc_encode_block(
         samples: &[Self],
         width: u32,
@@ -127,6 +127,34 @@ impl_write_sample!(u16, 1, 16, 2, write_u16);
 impl_write_sample!(i16, 2, 16, 2, write_i16);
 impl_write_sample!(u32, 1, 32, 4, write_u32);
 impl_write_sample!(i32, 2, 32, 4, write_i32);
+#[cfg(feature = "f16")]
+impl TiffWriteSample for half::f16 {
+    const SAMPLE_FORMAT: u16 = 3;
+    const BITS_PER_SAMPLE: u16 = 16;
+    const BYTES_PER_SAMPLE: usize = 2;
+
+    fn encode_slice(samples: &[Self], byte_order: ByteOrder) -> Vec<u8> {
+        let mut out = Vec::with_capacity(samples.len() * Self::BYTES_PER_SAMPLE);
+        for &value in samples {
+            out.extend_from_slice(&byte_order.write_u16(value.to_bits()));
+        }
+        out
+    }
+
+    fn lerc_encode_block(
+        _samples: &[Self],
+        _width: u32,
+        _height: u32,
+        _depth: u32,
+        _max_z_error: f64,
+        index: usize,
+    ) -> crate::error::Result<Vec<u8>> {
+        Err(crate::error::Error::CompressionFailed {
+            index,
+            reason: "LERC does not support 16-bit float samples".into(),
+        })
+    }
+}
 impl_write_sample!(f32, 3, 32, 4, write_f32);
 impl_write_sample!(f64, 3, 64, 8, write_f64);
 impl_write_sample_no_lerc!(u64, 1, 64, 8, write_u64);

@@ -2,10 +2,11 @@
 
 ## Unreleased
 
+- add optional `f16` features to the TIFF and GeoTIFF readers/writers, enabling `half::f16` rasters encoded as `SampleFormat=Float` with 16 bits per sample
 - add `deflate_level(0..=9)` to `ImageBuilder` and `GeoTiffBuilder` for controlling Deflate output size/speed, plus `compress_with_level` in `tiff-writer::compress`; `BlockEncodingOptions` gains a `deflate_level` field
 - speed up decode and write paths: switch the Deflate backend to the pure-Rust `zlib-rs` (~20-40% faster on predictor-compressed rasters), stream overview resampling by source row spans (~6x faster streaming COG average overviews), copy raster regions by row slice instead of per-element indexing (~4.5x faster plain multiband writes), resolve per-block decode metadata once per read, encode writer tag values once, and reuse the floating-point predictor scratch buffer across rows
 - pad one-shot COG edge tiles with the configured nodata fill value instead of zero, matching the streaming tile writer and overview generation paths
-- reject writer configurations that pair the horizontal predictor with float samples, the floating-point predictor with integer samples, or float sample formats below 32 bits, instead of emitting files other readers refuse
+- reject writer configurations that pair the horizontal predictor with float samples, the floating-point predictor with integer samples, or unsupported float widths; 16-bit float samples require the optional `f16` feature
 - decode `BitsPerSample`/`SampleFormat` tags stored with nonstandard BYTE or LONG encodings instead of silently falling back to 1-bit defaults, and reject other unexpected tag types via new `Ifd::checked_bits_per_sample` / `Ifd::checked_sample_format` used by all decode paths
 - round integer overview resampling to the nearest value instead of truncating toward zero, and reject GeoTIFF/COG nodata strings that are out of range or fractional for the raster sample type instead of silently saturating the fill value
 - fix decoded YCbCr chroma scaling to honor the `ReferenceBlackWhite` chroma ranges per TIFF 6.0 (`127/(ReferenceMax - ReferenceZero)` for 8-bit samples) instead of always dividing by the full-scale range; output is unchanged for files using the default headroom-free references

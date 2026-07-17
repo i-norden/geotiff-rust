@@ -845,7 +845,7 @@ fn validate_sample_encoding(sample_format: u16, bits_per_sample: u16) -> Result<
     let supported = match sample_format {
         1 => matches!(bits_per_sample, 1 | 2 | 4 | 8 | 16 | 32 | 64),
         2 => matches!(bits_per_sample, 8 | 16 | 32 | 64),
-        3 => matches!(bits_per_sample, 32 | 64),
+        3 => matches!(bits_per_sample, 32 | 64) || (cfg!(feature = "f16") && bits_per_sample == 16),
         _ => false,
     };
     if !supported {
@@ -1059,6 +1059,20 @@ mod tests {
             index: 0,
             offset: 0,
         }
+    }
+
+    #[test]
+    fn float16_sample_encoding_requires_feature() {
+        let result = super::validate_sample_encoding(3, 16);
+
+        #[cfg(feature = "f16")]
+        assert!(result.is_ok());
+
+        #[cfg(not(feature = "f16"))]
+        assert!(matches!(
+            result,
+            Err(crate::error::Error::UnsupportedBitsPerSample(16))
+        ));
     }
 
     #[test]

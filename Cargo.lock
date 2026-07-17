@@ -349,6 +349,7 @@ dependencies = [
  "geotiff-core",
  "geotiff-reader",
  "geotiff-writer",
+ "half",
  "ndarray",
  "serde_json",
  "tempfile",
@@ -377,6 +378,7 @@ name = "geotiff-writer"
 version = "0.7.0"
 dependencies = [
  "geotiff-core",
+ "half",
  "ndarray",
  "tempfile",
  "thiserror",
@@ -424,13 +426,12 @@ dependencies = [
 
 [[package]]
 name = "half"
-version = "2.7.1"
+version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
+checksum = "6dd08c532ae367adf81c312a4580bc67f1d0fe8bc9c460520283f4c0ff277888"
 dependencies = [
  "cfg-if",
  "crunchy",
- "zerocopy",
 ]
 
 [[package]]
@@ -1476,6 +1477,7 @@ dependencies = [
 name = "tiff-core"
 version = "0.7.0"
 dependencies = [
+ "half",
  "thiserror",
 ]
 
@@ -1484,6 +1486,7 @@ name = "tiff-integration"
 version = "0.7.0"
 dependencies = [
  "criterion",
+ "half",
  "ndarray",
  "serde_json",
  "tempfile",
@@ -1517,6 +1520,7 @@ name = "tiff-writer"
 version = "0.7.0"
 dependencies = [
  "flate2",
+ "half",
  "jpeg-encoder",
  "lerc-core",
  "lerc-writer",

@@ -19,3 +19,7 @@ tiff-core = { version = "0.7.0", path = "../tiff-core" }
 ndarray = { workspace = true }
 thiserror = { workspace = true }
 tempfile = "3"
+half = { workspace = true, optional = true }
+
+[features]
+f16 = ["dep:half", "tiff-writer/f16"]

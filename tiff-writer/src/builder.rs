@@ -737,11 +737,27 @@ impl ImageBuilder {
                 "LERC compression does not support TIFF predictors".into(),
             ));
         }
-        if matches!(self.sample_format, SampleFormat::Float) && self.bits_per_sample < 32 {
+        let supported_float_bits = matches!(self.bits_per_sample, 32 | 64)
+            || (cfg!(feature = "f16") && self.bits_per_sample == 16);
+        if matches!(self.sample_format, SampleFormat::Float) && !supported_float_bits {
+            let supported = if cfg!(feature = "f16") {
+                "16, 32, or 64"
+            } else {
+                "32 or 64"
+            };
             return Err(crate::error::Error::InvalidConfig(format!(
-                "float sample format requires 32 or 64 bits per sample, got {}",
+                "float sample format requires {supported} bits per sample, got {}",
                 self.bits_per_sample
             )));
+        }
+        if cfg!(feature = "f16")
+            && matches!(self.compression, Compression::Lerc)
+            && matches!(self.sample_format, SampleFormat::Float)
+            && self.bits_per_sample == 16
+        {
+            return Err(crate::error::Error::InvalidConfig(
+                "LERC compression does not support 16-bit float samples".into(),
+            ));
         }
         match self.predictor {
             Predictor::Horizontal => {
@@ -1178,14 +1194,18 @@ mod tests {
             matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("floating-point predictor"))
         );
 
-        let err = ImageBuilder::new(4, 4)
+        let f16_builder = ImageBuilder::new(4, 4)
             .bits_per_sample(16)
-            .sample_format(tiff_core::SampleFormat::Float)
-            .validate()
-            .unwrap_err();
-        assert!(
-            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("32 or 64 bits"))
-        );
+            .sample_format(tiff_core::SampleFormat::Float);
+        #[cfg(not(feature = "f16"))]
+        {
+            let err = f16_builder.validate().unwrap_err();
+            assert!(
+                matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("32 or 64 bits"))
+            );
+        }
+        #[cfg(feature = "f16")]
+        assert!(f16_builder.validate().is_ok());
 
         assert!(ImageBuilder::new(4, 4)
             .sample_type::<u16>()
@@ -1199,6 +1219,19 @@ mod tests {
             .predictor(tiff_core::Predictor::FloatingPoint)
             .validate()
             .is_ok());
+    }
+
+    #[cfg(feature = "f16")]
+    #[test]
+    fn validate_rejects_lerc_with_f16_samples() {
+        let err = ImageBuilder::new(4, 4)
+            .sample_type::<half::f16>()
+            .compression(tiff_core::Compression::Lerc)
+            .validate()
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("LERC compression does not support 16-bit float samples"))
+        );
     }
 
     #[test]

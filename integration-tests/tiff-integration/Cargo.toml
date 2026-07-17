@@ -10,6 +10,10 @@ tiff-core = { version = "0.7.0", path = "../../tiff-core" }
 tiff-reader = { version = "0.7.0", path = "../../tiff-reader" }
 tiff-writer = { version = "0.7.0", path = "../../tiff-writer" }
 ndarray = { workspace = true }
+half = { workspace = true, optional = true }
+
+[features]
+f16 = ["dep:half", "tiff-core/f16", "tiff-reader/f16", "tiff-writer/f16"]
 
 [dev-dependencies]
 criterion = "0.5"

@@ -111,6 +111,59 @@ fn stripped_roundtrips_cover_core_sample_types() {
     assert_eq!(f64_values, vec![1.0, 2.0, 3.0, 4.0]);
 }
 
+#[cfg(feature = "f16")]
+#[test]
+fn f16_roundtrips_across_byte_orders_and_float_predictors() {
+    use half::f16;
+
+    let expected = [
+        f16::from_bits(0x0001),
+        f16::from_f32(-1.5),
+        f16::from_f32(42.25),
+        f16::from_bits(0x8000),
+    ];
+    for byte_order in [
+        tiff_core::ByteOrder::LittleEndian,
+        tiff_core::ByteOrder::BigEndian,
+    ] {
+        for predictor in [Predictor::None, Predictor::FloatingPoint] {
+            let mut buf = Cursor::new(Vec::new());
+            let mut writer = TiffWriter::new(
+                &mut buf,
+                WriteOptions {
+                    byte_order,
+                    variant: TiffVariant::Auto,
+                },
+            )
+            .unwrap();
+            let image = ImageBuilder::new(2, 2)
+                .sample_type::<f16>()
+                .strips(2)
+                .compression(Compression::Deflate)
+                .predictor(predictor);
+            let handle = writer.add_image(image).unwrap();
+            writer.write_block(&handle, 0, &expected).unwrap();
+            writer.finish().unwrap();
+
+            let file = TiffFile::from_bytes(buf.into_inner()).unwrap();
+            let ifd = file.ifd(0).unwrap();
+            assert_eq!(ifd.bits_per_sample(), vec![16]);
+            assert_eq!(ifd.sample_format(), vec![3]);
+            let actual = file.read_image::<f16>(0).unwrap();
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
 #[test]
 fn multi_strip_window_roundtrips() {
     let mut buf = Cursor::new(Vec::new());
