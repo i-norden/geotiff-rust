@@ -24,6 +24,7 @@ parking_lot = "0.12"
 
 [features]
 default = ["local", "rayon"]
+f16 = ["local", "tiff-reader/f16"]
 local = ["dep:tiff-reader"]
 rayon = ["dep:rayon", "local", "tiff-reader/rayon"]
 cog = ["dep:reqwest", "local", "rustls-tls"]

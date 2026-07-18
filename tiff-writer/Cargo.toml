@@ -19,9 +19,11 @@ lerc-writer = { workspace = true }
 thiserror = { workspace = true }
 flate2 = { version = "1.0.35", default-features = false, features = ["zlib-rs"] }
 weezl = "0.1"
+half = { workspace = true, optional = true }
 
 [features]
 default = ["jpeg", "zstd"]
+f16 = ["dep:half", "tiff-core/f16"]
 jpeg = ["dep:jpeg-encoder"]
 zstd = ["dep:ruzstd"]
 

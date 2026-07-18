@@ -102,6 +102,42 @@ fn geotiff_roundtrips_pixels_metadata_and_transform() {
     assert!((y - 200.0).abs() < 1e-10);
 }
 
+#[cfg(feature = "f16")]
+#[test]
+fn geotiff_roundtrips_f16_pixels_and_nodata() {
+    use half::f16;
+
+    let values = [
+        f16::from_f32(-1.5),
+        f16::from_f32(0.25),
+        f16::from_f32(42.0),
+        f16::from_f32(65504.0),
+    ];
+    let data = Array2::from_shape_vec((2, 2), values.to_vec()).unwrap();
+    let mut buf = Cursor::new(Vec::new());
+    GeoTiffBuilder::new(2, 2)
+        .epsg(4326)
+        .nodata("-1.5")
+        .compression(Compression::Deflate)
+        .predictor(tiff_core::Predictor::FloatingPoint)
+        .write_2d_to(&mut buf, data.view())
+        .unwrap();
+
+    let file = GeoTiffFile::from_bytes(buf.into_inner()).unwrap();
+    assert_eq!(file.nodata(), Some("-1.5"));
+    let actual = file.read_raster::<f16>().unwrap();
+    assert_eq!(
+        actual
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        values
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn pixel_is_point_transform_serialization_roundtrips_without_half_pixel_shift() {
     let data = Array2::<u8>::from_elem((2, 2), 1);

@@ -27,6 +27,7 @@ smallvec = "1"
 
 [features]
 default = ["rayon", "jpeg", "zstd"]
+f16 = ["tiff-core/f16"]
 rayon = ["dep:rayon"]
 jpeg = ["dep:jpeg-decoder"]
 zstd = ["dep:ruzstd"]

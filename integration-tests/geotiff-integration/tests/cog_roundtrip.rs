@@ -177,6 +177,48 @@ fn cog_layout_and_overview_discovery_roundtrip() {
     assert_eq!(geo.read_overview::<u8>(1).unwrap().shape(), &[16, 16]);
 }
 
+#[cfg(feature = "f16")]
+#[test]
+fn cog_f16_average_overview_roundtrips() {
+    use half::f16;
+
+    let data = Array2::from_shape_fn((4, 4), |(row, col)| {
+        let value = match (row / 2, col / 2) {
+            (0, 0) => 1.0,
+            (0, 1) => 2.0,
+            (1, 0) => 3.0,
+            _ => 4.0,
+        };
+        f16::from_f32(value)
+    });
+    let mut buf = Cursor::new(Vec::new());
+    let builder = GeoTiffBuilder::new(4, 4)
+        .tile_size(16, 16)
+        .compression(Compression::Deflate)
+        .predictor(tiff_core::Predictor::FloatingPoint);
+
+    CogBuilder::new(builder)
+        .overview_levels(vec![2])
+        .resampling(Resampling::Average)
+        .write_2d_to(&mut buf, data.view())
+        .unwrap();
+
+    let tiff = TiffFile::from_bytes(buf.into_inner()).unwrap();
+    let base = tiff.read_image::<f16>(0).unwrap();
+    assert_eq!(
+        base.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+        data.iter().map(|value| value.to_bits()).collect::<Vec<_>>()
+    );
+    let overview = tiff.read_image::<f16>(1).unwrap();
+    assert_eq!(
+        overview
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        [1.0f32, 2.0, 3.0, 4.0].map(f16::from_f32).map(f16::to_bits)
+    );
+}
+
 #[test]
 fn cog_overview_transformation_matrix_scales_pixel_axes() {
     let data = Array2::<u8>::from_elem((32, 32), 9);

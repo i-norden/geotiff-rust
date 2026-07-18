@@ -14,3 +14,7 @@ categories = ["science", "data-structures"]
 
 [dependencies]
 thiserror = { workspace = true }
+half = { workspace = true, optional = true }
+
+[features]
+f16 = ["dep:half"]
