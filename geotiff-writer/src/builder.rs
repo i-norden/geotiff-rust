@@ -13,10 +13,10 @@ use tiff_core::{
     ColorMap, Compression, ExtraSample, InkSet, PhotometricInterpretation, PlanarConfiguration,
     Predictor, Tag, TagValue, YCbCrPositioning,
 };
-use tiff_writer::{ImageBuilder, JpegOptions, TiffVariant, TiffWriter, WriteOptions};
+use tiff_writer::{DataLayout, ImageBuilder, JpegOptions, TiffVariant, TiffWriter, WriteOptions};
 
 use crate::error::{Error, Result};
-use crate::sample::{NumericSample, WriteSample};
+use crate::sample::{nodata_fill_or_zero, NumericSample, WriteSample};
 use crate::tile_writer::StreamingTileWriter;
 
 pub(crate) fn checked_sample_count(dimensions: &[usize], context: &str) -> Result<usize> {
@@ -652,7 +652,7 @@ impl GeoTiffBuilder {
     // ---- Write methods ----
 
     /// Write a single-band 2D array to a file path.
-    pub fn write_2d<T: WriteSample, P: AsRef<Path>>(
+    pub fn write_2d<T: NumericSample, P: AsRef<Path>>(
         &self,
         path: P,
         data: ArrayView2<T>,
@@ -663,7 +663,7 @@ impl GeoTiffBuilder {
     }
 
     /// Write a single-band 2D array to any Write+Seek target.
-    pub fn write_2d_to<T: WriteSample, W: Write + Seek>(
+    pub fn write_2d_to<T: NumericSample, W: Write + Seek>(
         &self,
         sink: W,
         data: ArrayView2<T>,
@@ -673,6 +673,8 @@ impl GeoTiffBuilder {
 
         let ib = self.to_image_builder::<T>()?;
         let block_count = ib.checked_block_count()?;
+        let layout = ib.data_layout();
+        let fill_value = nodata_fill_or_zero::<T>(&self.nodata)?;
         let mut writer = TiffWriter::new(
             sink,
             WriteOptions {
@@ -683,7 +685,7 @@ impl GeoTiffBuilder {
         let handle = writer.add_image(ib)?;
 
         for block_idx in 0..block_count {
-            let samples = self.extract_block_2d(&data, block_idx);
+            let samples = self.extract_block_2d(&data, block_idx, layout, fill_value);
             writer.write_block(&handle, block_idx, &samples)?;
         }
 
@@ -692,7 +694,7 @@ impl GeoTiffBuilder {
     }
 
     /// Write a multi-band 3D array [rows, cols, bands] to a file path.
-    pub fn write_3d<T: WriteSample, P: AsRef<Path>>(
+    pub fn write_3d<T: NumericSample, P: AsRef<Path>>(
         &self,
         path: P,
         data: ArrayView3<T>,
@@ -703,7 +705,7 @@ impl GeoTiffBuilder {
     }
 
     /// Write a multi-band 3D array to any Write+Seek target.
-    pub fn write_3d_to<T: WriteSample, W: Write + Seek>(
+    pub fn write_3d_to<T: NumericSample, W: Write + Seek>(
         &self,
         sink: W,
         data: ArrayView3<T>,
@@ -713,6 +715,8 @@ impl GeoTiffBuilder {
 
         let ib = self.to_image_builder::<T>()?;
         let block_count = ib.checked_block_count()?;
+        let layout = ib.data_layout();
+        let fill_value = nodata_fill_or_zero::<T>(&self.nodata)?;
         let mut writer = TiffWriter::new(
             sink,
             WriteOptions {
@@ -723,7 +727,7 @@ impl GeoTiffBuilder {
         let handle = writer.add_image(ib)?;
 
         for block_idx in 0..block_count {
-            let samples = self.extract_block_3d(&data, block_idx);
+            let samples = self.extract_block_3d(&data, block_idx, layout, fill_value);
             writer.write_block(&handle, block_idx, &samples)?;
         }
 
@@ -749,11 +753,16 @@ impl GeoTiffBuilder {
         self.tile_writer(writer)
     }
 
-    fn extract_block_2d<T: WriteSample>(&self, data: &ArrayView2<T>, block_idx: usize) -> Vec<T> {
-        let zero = T::decode_many(&vec![0u8; T::BYTES_PER_SAMPLE])[0];
-        if let (Some(tw), Some(th)) = (self.tile_width, self.tile_height) {
-            let tw = tw as usize;
-            let th = th as usize;
+    fn extract_block_2d<T: NumericSample>(
+        &self,
+        data: &ArrayView2<T>,
+        block_idx: usize,
+        layout: DataLayout,
+        fill_value: T,
+    ) -> Vec<T> {
+        if let DataLayout::Tiles { width, height } = layout {
+            let tw = width as usize;
+            let th = height as usize;
             let tiles_across = (self.width as usize).div_ceil(tw);
             let tile_row = block_idx / tiles_across;
             let tile_col = block_idx % tiles_across;
@@ -762,7 +771,7 @@ impl GeoTiffBuilder {
             let rows = th.min((self.height as usize).saturating_sub(start_row));
             let cols = tw.min((self.width as usize).saturating_sub(start_col));
 
-            let mut tile_data = vec![zero; tw * th];
+            let mut tile_data = vec![fill_value; tw * th];
             crate::raster_copy::copy_2d_region_into(
                 data,
                 crate::raster_copy::Region {
@@ -776,12 +785,12 @@ impl GeoTiffBuilder {
             );
             tile_data
         } else {
-            let rps = self.height.min(256) as usize;
+            let rps = strips_rows_per_strip(layout);
             let start_row = block_idx * rps;
             let end_row = ((block_idx + 1) * rps).min(self.height as usize);
             let w = self.width as usize;
 
-            let mut samples = vec![zero; (end_row - start_row) * w];
+            let mut samples = vec![fill_value; (end_row - start_row) * w];
             crate::raster_copy::copy_2d_region_into(
                 data,
                 crate::raster_copy::Region {
@@ -797,13 +806,18 @@ impl GeoTiffBuilder {
         }
     }
 
-    fn extract_block_3d<T: WriteSample>(&self, data: &ArrayView3<T>, block_idx: usize) -> Vec<T> {
-        let zero = T::decode_many(&vec![0u8; T::BYTES_PER_SAMPLE])[0];
+    fn extract_block_3d<T: NumericSample>(
+        &self,
+        data: &ArrayView3<T>,
+        block_idx: usize,
+        layout: DataLayout,
+        fill_value: T,
+    ) -> Vec<T> {
         let bands = self.bands as usize;
 
-        if let (Some(tw), Some(th)) = (self.tile_width, self.tile_height) {
-            let tw = tw as usize;
-            let th = th as usize;
+        if let DataLayout::Tiles { width, height } = layout {
+            let tw = width as usize;
+            let th = height as usize;
             let tiles_across = (self.width as usize).div_ceil(tw);
             let tiles_down = (self.height as usize).div_ceil(th);
             let tiles_per_plane = tiles_across * tiles_down;
@@ -817,7 +831,7 @@ impl GeoTiffBuilder {
             let rows = th.min((self.height as usize).saturating_sub(start_row));
             let cols = tw.min((self.width as usize).saturating_sub(start_col));
             if matches!(self.planar_configuration, PlanarConfiguration::Planar) {
-                let mut tile_data = vec![zero; tw * th];
+                let mut tile_data = vec![fill_value; tw * th];
                 crate::raster_copy::copy_3d_band_region_into(
                     data,
                     plane,
@@ -832,7 +846,7 @@ impl GeoTiffBuilder {
                 );
                 tile_data
             } else {
-                let mut tile_data = vec![zero; tw * th * bands];
+                let mut tile_data = vec![fill_value; tw * th * bands];
                 crate::raster_copy::copy_3d_chunky_region_into(
                     data,
                     crate::raster_copy::Region {
@@ -847,7 +861,7 @@ impl GeoTiffBuilder {
                 tile_data
             }
         } else {
-            let rps = self.rows_per_strip();
+            let rps = strips_rows_per_strip(layout);
             let strips_per_plane = (self.height as usize).div_ceil(rps);
             let (plane, plane_block_index) =
                 self.plane_and_block_index(block_idx, strips_per_plane, bands);
@@ -857,7 +871,7 @@ impl GeoTiffBuilder {
 
             let rows = end_row - start_row;
             if matches!(self.planar_configuration, PlanarConfiguration::Planar) {
-                let mut samples = vec![zero; rows * w];
+                let mut samples = vec![fill_value; rows * w];
                 crate::raster_copy::copy_3d_band_region_into(
                     data,
                     plane,
@@ -872,7 +886,7 @@ impl GeoTiffBuilder {
                 );
                 samples
             } else {
-                let mut samples = vec![zero; rows * w * bands];
+                let mut samples = vec![fill_value; rows * w * bands];
                 crate::raster_copy::copy_3d_chunky_region_into(
                     data,
                     crate::raster_copy::Region {
@@ -902,9 +916,12 @@ impl GeoTiffBuilder {
             (0, block_idx)
         }
     }
+}
 
-    fn rows_per_strip(&self) -> usize {
-        self.height.min(256) as usize
+fn strips_rows_per_strip(layout: DataLayout) -> usize {
+    match layout {
+        DataLayout::Strips { rows_per_strip } => (rows_per_strip as usize).max(1),
+        DataLayout::Tiles { .. } => 1,
     }
 }
 

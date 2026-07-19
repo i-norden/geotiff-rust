@@ -335,7 +335,7 @@ fn matches_libtiff_directory_layout_for_interoperability_corpus() {
                 "{relative_path} ifd {index}"
             );
             assert_eq!(
-                ifd.bits_per_sample(),
+                ifd.bits_per_sample().unwrap(),
                 directory.bits_per_sample,
                 "{relative_path} ifd {index}"
             );
@@ -355,7 +355,7 @@ fn matches_libtiff_directory_layout_for_interoperability_corpus() {
                 "{relative_path} ifd {index}"
             );
             assert_eq!(
-                ifd.sample_format(),
+                ifd.sample_format().unwrap(),
                 directory.sample_format,
                 "{relative_path} ifd {index}"
             );
@@ -366,7 +366,7 @@ fn matches_libtiff_directory_layout_for_interoperability_corpus() {
             );
             assert_eq!(
                 ifd.rows_per_strip(),
-                directory.rows_per_strip.or(Some(directory.height)),
+                directory.rows_per_strip.unwrap_or(directory.height),
                 "{relative_path} ifd {index}"
             );
             assert_eq!(

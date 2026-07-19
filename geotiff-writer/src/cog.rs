@@ -571,37 +571,6 @@ fn build_cog_image_tags(image: &CogImage, is_bigtiff: bool) -> Result<Vec<Tag>> 
     Ok(tags)
 }
 
-fn tag_value_storage_offset(
-    ifd_offset: u64,
-    is_bigtiff: bool,
-    tags: &[Tag],
-    target_code: u16,
-) -> Option<u64> {
-    let entry_size: u64 = if is_bigtiff { 20 } else { 12 };
-    let inline_max: usize = if is_bigtiff { 8 } else { 4 };
-    let next_ptr_size: u64 = if is_bigtiff { 8 } else { 4 };
-    let count_size: u64 = if is_bigtiff { 8 } else { 2 };
-    let value_field_offset: u64 = if is_bigtiff { 12 } else { 8 };
-    let mut deferred_offset =
-        ifd_offset + count_size + tags.len() as u64 * entry_size + next_ptr_size;
-
-    for (index, tag) in tags.iter().enumerate() {
-        let encoded_len = tag.value.encoded_len();
-        if tag.code == target_code {
-            return if encoded_len <= inline_max {
-                Some(ifd_offset + count_size + index as u64 * entry_size + value_field_offset)
-            } else {
-                Some(deferred_offset)
-            };
-        }
-        if encoded_len > inline_max {
-            deferred_offset += encoded_len as u64;
-        }
-    }
-
-    None
-}
-
 fn plan_cog_layout_for_variant(
     base_offset: u64,
     prefix_len: u64,
@@ -820,7 +789,7 @@ fn emit_cog<W: Write + Seek>(
                 sub_ifd_offsets.len()
             )));
         }
-        let sub_ifd_data_offset = tag_value_storage_offset(
+        let sub_ifd_data_offset = encoder::find_tag_value_offset(
             first_ifd.ifd_offset,
             layout.is_bigtiff,
             &layout.images[0].tags,

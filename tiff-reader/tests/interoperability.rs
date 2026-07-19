@@ -18,7 +18,7 @@ fn decodes_real_world_tiff_corpus() {
     assert_eq!(raster.shape(), &[20, 20]);
 
     let signed = TiffFile::open(fixture("gdal/gdrivers/data/gtiff/int8.tif")).unwrap();
-    assert_eq!(signed.ifd(0).unwrap().sample_format(), vec![2]);
+    assert_eq!(signed.ifd(0).unwrap().sample_format().unwrap(), vec![2]);
     let raster: ArrayD<i8> = signed.read_image(0).unwrap();
     assert_eq!(raster.shape(), &[20, 20]);
 
