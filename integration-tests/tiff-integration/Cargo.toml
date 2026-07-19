@@ -17,6 +17,7 @@ f16 = ["dep:half", "tiff-core/f16", "tiff-reader/f16", "tiff-writer/f16"]
 
 [dev-dependencies]
 criterion = "0.5"
+proptest = "1"
 tempfile = "3"
 serde_json = "1"
 

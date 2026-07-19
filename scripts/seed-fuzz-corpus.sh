@@ -23,3 +23,18 @@ while IFS=$'\t' read -r relative_path _expected_sha targets _source_url; do
         cp "$source_path" "$fuzz_root/geotiff_open/$file_name"
     fi
 done < "$manifest"
+
+# Deterministic synthetic seeds for decode paths that the interoperability
+# corpus does not cover: sparse blocks (zero offset/byte count) and
+# video-range YCbCr ReferenceBlackWhite handling.
+write_synthetic_seed() {
+    local file_name="$1"
+    local payload_base64="$2"
+    printf '%s' "$payload_base64" | base64 -d > "$fuzz_root/tiff_open/$file_name"
+    printf '%s' "$payload_base64" | base64 -d > "$fuzz_root/geotiff_open/$file_name"
+}
+
+write_synthetic_seed "synthetic-sparse-strips.tif" \
+    "SUkqAAgAAAAIAAABBAABAAAABAAAAAEBBAABAAAAAgAAAAIBAwABAAAACAAAAAMBAwABAAAAAQAAABEBBAACAAAAdgAAABUBAwABAAAAAQAAABYBBAABAAAAAQAAABcBBAACAAAAfgAAAAAAAAABAgMEBQYHCG4AAAAAAAAABAAAAAAAAAA="
+write_synthetic_seed "synthetic-video-range-ycbcr.tif" \
+    "SUkqAAgAAAAKAAABBAABAAAAAQAAAAEBBAABAAAAAQAAAAIBAwADAAAAiQAAAAMBAwABAAAAAQAAAAYBAwABAAAABgAAABEBBAABAAAAhgAAABUBAwABAAAAAwAAABYBBAABAAAAAQAAABcBBAABAAAAAwAAABQCBQAGAAAAjwAAAAAAAAB+yb4IAAgACAAQAAAAAQAAAOsAAAABAAAAgAAAAAEAAADwAAAAAQAAAIAAAAABAAAA8AAAAAEAAAA="
