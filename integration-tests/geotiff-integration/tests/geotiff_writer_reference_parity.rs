@@ -220,3 +220,39 @@ fn matches_gdal_for_generated_jpeg_geotiff() {
 
     assert_gdal_u8_pixels_close(fixture.path());
 }
+
+#[test]
+fn matches_gdal_for_generated_sparse_cog() {
+    if !reference::python_gdal_available() {
+        eprintln!("skipping GDAL sparse parity test because Python GDAL bindings are unavailable");
+        return;
+    }
+
+    let mut data = ndarray::Array2::<u8>::zeros((48, 32));
+    for row in 0..16 {
+        for col in 0..16 {
+            data[[row, col]] = ((row * 16 + col) % 251) as u8;
+        }
+    }
+
+    let fixture = NamedTempFile::new().unwrap();
+    CogBuilder::new(
+        GeoTiffBuilder::new(32, 48)
+            .tile_size(16, 16)
+            .compression(Compression::Deflate)
+            .sparse(true)
+            .epsg(4326)
+            .pixel_scale(1.0, 1.0)
+            .origin(-180.0, 90.0),
+    )
+    .no_overviews()
+    .write_2d(fixture.path(), data.view())
+    .unwrap();
+
+    // Confirm the file actually contains sparse tiles before comparing.
+    let tiff = tiff_reader::TiffFile::open(fixture.path()).unwrap();
+    let offsets = tiff.ifd(0).unwrap().tile_offsets().unwrap();
+    assert!(offsets.iter().filter(|&&offset| offset == 0).count() >= 4);
+
+    assert_gdal_hash_matches(fixture.path(), None);
+}

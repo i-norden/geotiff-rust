@@ -764,3 +764,72 @@ fn cog_edge_tiles_pad_with_nodata_fill() {
     assert_eq!(samples[17], 40);
     assert!(samples[18..].iter().all(|&value| value == -1));
 }
+
+#[test]
+fn sparse_cog_skips_zero_tiles_and_reads_back_as_zero() {
+    let mut data = Array2::<u16>::zeros((48, 32));
+    for row in 0..16 {
+        for col in 0..16 {
+            data[[row, col]] = (row * 16 + col + 1) as u16;
+        }
+    }
+
+    let mut buf = Cursor::new(Vec::new());
+    CogBuilder::new(
+        GeoTiffBuilder::new(32, 48)
+            .tile_size(16, 16)
+            .compression(Compression::Deflate)
+            .sparse(true),
+    )
+    .no_overviews()
+    .write_2d_to(&mut buf, data.view())
+    .unwrap();
+
+    let tiff = TiffFile::from_bytes(buf.into_inner()).unwrap();
+    let ifd = tiff.ifd(0).unwrap();
+    let offsets = ifd.tile_offsets().unwrap();
+    let counts = ifd.tile_byte_counts().unwrap();
+    assert_eq!(offsets.len(), 6);
+    assert!(offsets[0] > 0 && counts[0] > 0, "data tile must be written");
+    assert!(
+        offsets[1..].iter().all(|&offset| offset == 0)
+            && counts[1..].iter().all(|&count| count == 0),
+        "all-zero tiles must be sparse: {offsets:?} {counts:?}"
+    );
+
+    let decoded = tiff.read_image::<u16>(0).unwrap();
+    assert_eq!(decoded[[0, 0]], 1);
+    assert_eq!(decoded[[15, 15]], 256);
+    assert!(decoded
+        .indexed_iter()
+        .filter(|(index, _)| index[0] >= 16 || index[1] >= 16)
+        .all(|(_, &value)| value == 0));
+}
+
+#[test]
+fn sparse_streaming_tile_writer_skips_missing_and_zero_tiles() {
+    let builder = GeoTiffBuilder::new(32, 32).tile_size(16, 16).sparse(true);
+    let mut buf = Cursor::new(Vec::new());
+    let mut writer = builder.tile_writer::<u8, _>(&mut buf).unwrap();
+    let data_tile = Array2::<u8>::from_elem((16, 16), 9);
+    let zero_tile = Array2::<u8>::zeros((16, 16));
+    writer.write_tile(0, 0, &data_tile.view()).unwrap();
+    writer.write_tile(16, 0, &zero_tile.view()).unwrap();
+    // tiles at (0,16) and (16,16) never written
+    writer.finish().unwrap();
+
+    let tiff = TiffFile::from_bytes(buf.into_inner()).unwrap();
+    let ifd = tiff.ifd(0).unwrap();
+    let offsets = ifd.tile_offsets().unwrap();
+    assert!(offsets[0] > 0);
+    assert!(offsets[1..].iter().all(|&offset| offset == 0));
+
+    let decoded = tiff.read_image::<u8>(0).unwrap();
+    assert!(decoded.indexed_iter().all(|(index, &value)| {
+        if index[0] < 16 && index[1] < 16 {
+            value == 9
+        } else {
+            value == 0
+        }
+    }));
+}
