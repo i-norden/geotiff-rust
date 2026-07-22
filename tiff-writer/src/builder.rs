@@ -377,7 +377,7 @@ impl ImageBuilder {
                 TagValue::Short(vec![ink_set.to_code()]),
             ));
         }
-        if let Some([h, v]) = self.ycbcr_subsampling {
+        if let Some([h, v]) = self.effective_ycbcr_subsampling() {
             extra_tags.push(Tag::new(TAG_YCBCR_SUBSAMPLING, TagValue::Short(vec![h, v])));
         }
         if let Some(positioning) = self.ycbcr_positioning {
@@ -474,6 +474,28 @@ impl ImageBuilder {
                 remaining.min(rps) as u32
             }
         }
+    }
+
+    /// YCbCr subsampling recorded in the file.
+    ///
+    /// Defaults to 2x2 for JPEG-compressed YCbCr output, matching the JPEG
+    /// encoder's chroma subsampling.
+    pub(crate) fn effective_ycbcr_subsampling(&self) -> Option<[u16; 2]> {
+        if self.ycbcr_subsampling.is_some() {
+            return self.ycbcr_subsampling;
+        }
+        (matches!(self.photometric, PhotometricInterpretation::YCbCr)
+            && matches!(self.compression, Compression::Jpeg))
+        .then_some([2, 2])
+    }
+
+    /// Chroma subsampling applied by the JPEG encoder for interleaved YCbCr
+    /// blocks. `None` for grayscale/planar JPEG blocks.
+    pub fn jpeg_chroma_sampling(&self) -> Option<[u16; 2]> {
+        (matches!(self.photometric, PhotometricInterpretation::YCbCr)
+            && matches!(self.compression, Compression::Jpeg)
+            && self.block_samples_per_pixel() == 3)
+            .then(|| self.effective_ycbcr_subsampling().unwrap_or([1, 1]))
     }
 
     /// Build the `TAG_LERC_PARAMETERS` tag if LERC compression is configured.
@@ -700,9 +722,12 @@ impl ImageBuilder {
                 ));
             }
             if let Some(subsampling) = self.ycbcr_subsampling {
-                if subsampling != [1, 1] {
+                let supported = subsampling == [1, 1]
+                    || (matches!(self.compression, Compression::Jpeg) && subsampling == [2, 2]);
+                if !supported {
                     return Err(crate::error::Error::InvalidConfig(format!(
-                        "YCbCr subsampling {:?} is not supported by the current writer",
+                        "YCbCr subsampling {:?} is not supported by the current writer; \
+                         supported values are [1, 1], and [2, 2] with JPEG compression",
                         subsampling
                     )));
                 }
@@ -805,11 +830,23 @@ impl ImageBuilder {
         }
 
         let block_samples_per_pixel = self.block_samples_per_pixel();
-        if block_samples_per_pixel != 1 {
-            return Err(crate::error::Error::InvalidConfig(format!(
-                "JPEG write currently supports one sample per encoded block, got {}; use planar configuration for multi-band JPEG",
-                block_samples_per_pixel
-            )));
+        match block_samples_per_pixel {
+            1 => {}
+            3 => {
+                if !matches!(self.photometric, PhotometricInterpretation::YCbCr) {
+                    return Err(crate::error::Error::InvalidConfig(
+                        "interleaved 3-sample JPEG blocks require YCbCr photometric \
+                         interpretation; use planar configuration for other color models"
+                            .into(),
+                    ));
+                }
+            }
+            other => {
+                return Err(crate::error::Error::InvalidConfig(format!(
+                    "JPEG write supports 1 or 3 samples per encoded block, got {other}; \
+                     use planar configuration for other band counts"
+                )));
+            }
         }
 
         if matches!(
