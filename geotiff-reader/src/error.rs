@@ -12,7 +12,7 @@ pub enum Error {
     Tiff(#[from] tiff_reader::TiffError),
 
     #[error("HTTP error: {0}")]
-    #[cfg(feature = "cog")]
+    #[cfg(any(feature = "cog", feature = "cog-async"))]
     Http(#[from] reqwest::Error),
 
     #[error("not a GeoTIFF: missing GeoTIFF metadata")]

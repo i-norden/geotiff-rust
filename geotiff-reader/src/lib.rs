@@ -32,6 +32,15 @@ pub mod transform;
 #[cfg(feature = "cog")]
 pub mod cog;
 
+#[cfg(feature = "cog-async")]
+pub mod cog_async;
+
+#[cfg(any(feature = "cog", feature = "cog-async"))]
+mod http_range;
+
+#[cfg(all(test, any(feature = "cog", feature = "cog-async")))]
+mod http_test_support;
+
 pub use error::{Error, Result};
 
 #[cfg(feature = "local")]
