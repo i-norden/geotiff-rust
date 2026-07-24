@@ -5,7 +5,7 @@
 //! - **BigTIFF**: `II`/`MM` byte order mark + version 43
 //! - **Sources**: file-backed random access, opt-in mmap, in-memory bytes, or any custom random-access source
 //! - **Reads**: full rasters, windows, and single storage-domain bands
-//! - **Compression**: None, Deflate, LZW, PackBits, LERC, JPEG (feature), ZSTD (feature)
+//! - **Compression**: None, Deflate, LZW, PackBits, LERC, JPEG (feature), ZSTD (feature), WebP (feature)
 //!
 //! TIFF-side `LERC+DEFLATE` is supported unconditionally. TIFF-side
 //! `LERC+ZSTD` requires the default `zstd` feature.
@@ -2283,6 +2283,89 @@ mod tests {
             matches!(error, Error::UnexpectedTagType { tag: 258, .. }),
             "{error}"
         );
+    }
+
+    #[cfg(feature = "webp")]
+    #[test]
+    fn decodes_webp_compressed_rgb_tiles() {
+        let (tile_w, tile_h) = (16usize, 16usize);
+        let mut rgb = vec![0u8; tile_w * tile_h * 3];
+        for row in 0..tile_h {
+            for col in 0..tile_w {
+                let base = (row * tile_w + col) * 3;
+                rgb[base] = (row * 16) as u8;
+                rgb[base + 1] = (col * 16) as u8;
+                rgb[base + 2] = ((row + col) * 8) as u8;
+            }
+        }
+
+        // Lossless WebP payload for the tile.
+        let mut webp = Vec::new();
+        image_webp::WebPEncoder::new(&mut webp)
+            .encode(
+                &rgb,
+                tile_w as u32,
+                tile_h as u32,
+                image_webp::ColorType::Rgb8,
+            )
+            .unwrap();
+
+        let data = build_tiled_tiff_with_overrides(
+            16,
+            16,
+            16,
+            16,
+            &[&webp],
+            &[
+                (
+                    258,
+                    3,
+                    3,
+                    [8u16, 8, 8].into_iter().flat_map(le_u16).collect(),
+                ),
+                (259, 3, 1, inline_short(50001)),
+                (262, 3, 1, inline_short(2)),
+                (277, 3, 1, inline_short(3)),
+            ],
+        );
+        let file = TiffFile::from_bytes(data).unwrap();
+        let image = file.read_image::<u8>(0).unwrap();
+        assert_eq!(image.shape(), &[16, 16, 3]);
+        let (values, offset) = image.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(values, rgb);
+    }
+
+    #[cfg(feature = "webp")]
+    #[test]
+    fn rejects_webp_payload_dimensions_that_do_not_match_tile() {
+        let rgb = vec![17u8; 8 * 32 * 3];
+        let mut webp = Vec::new();
+        image_webp::WebPEncoder::new(&mut webp)
+            .encode(&rgb, 8, 32, image_webp::ColorType::Rgb8)
+            .unwrap();
+
+        let data = build_tiled_tiff_with_overrides(
+            16,
+            16,
+            16,
+            16,
+            &[&webp],
+            &[
+                (
+                    258,
+                    3,
+                    3,
+                    [8u16, 8, 8].into_iter().flat_map(le_u16).collect(),
+                ),
+                (259, 3, 1, inline_short(50001)),
+                (262, 3, 1, inline_short(2)),
+                (277, 3, 1, inline_short(3)),
+            ],
+        );
+        let file = TiffFile::from_bytes(data).unwrap();
+        let error = file.read_image::<u8>(0).unwrap_err();
+        assert!(error.to_string().contains("dimensions 8x32"), "{error}");
     }
 
     #[test]

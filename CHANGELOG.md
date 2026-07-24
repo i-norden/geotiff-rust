@@ -4,6 +4,7 @@
 
 Breaking changes:
 
+- raise the minimum supported Rust version from 1.77 to 1.85
 - remove the `ImageBuilder` helpers deprecated since 0.6.0 (`block_count`, `block_sample_count`, `estimated_uncompressed_bytes`, `layout_tags`, `build_tags`); use the `checked_*` equivalents
 - collapse duplicate reader methods: `read_*_samples` and `read_*_sample_bytes` aliases fold into `read_image` / `read_window` / `read_band*` and the `*_bytes` variants on `TiffFile` and `GeoTiffFile`
 - `Ifd::rows_per_strip` returns `u32` (it always resolved to a value); `Ifd::bits_per_sample` / `Ifd::sample_format` are now the validating `Result` accessors introduced in this release
@@ -14,6 +15,7 @@ Breaking changes:
 Other changes:
 
 - add optional `f16` features to the TIFF and GeoTIFF readers/writers, enabling `half::f16` rasters encoded as `SampleFormat=Float` with 16 bits per sample
+- decode WebP-compressed TIFF blocks (compression 50001) behind a new default `webp` feature on `tiff-reader`, using the pure-Rust `image-webp` crate with the standard decoded-size budget checks
 - write interleaved YCbCr JPEG (the standard web-visualization COG configuration): chunky 3-sample JPEG blocks with `PhotometricInterpretation::YCbCr` encode with 2x2 chroma subsampling by default, emit the matching `YCbCrSubsampling` tag, and validate against GDAL; `BlockEncodingOptions` gains a `jpeg_sampling` field
 - add sparse tile/strip writing via `GeoTiffBuilder::sparse(true)` (GDAL `SPARSE_OK` semantics): all-zero blocks are recorded with zero offsets and byte counts across plain, streaming, and COG write paths, and `TiffWriter::write_block_sparse` exposes the primitive
 - add a property-based writer→reader roundtrip suite covering sample types, compressions, predictors, planar layouts, strips/tiles, and both byte orders; a big-endian GDAL parity test for writer output; and synthetic sparse-block and video-range-YCbCr fuzz seeds

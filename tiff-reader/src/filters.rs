@@ -1,6 +1,6 @@
 //! Compression filter pipeline for TIFF strip/tile decompression.
 
-#[cfg(any(feature = "jpeg", feature = "zstd"))]
+#[cfg(any(feature = "jpeg", feature = "zstd", feature = "webp"))]
 use std::io::Cursor;
 use std::io::Read;
 #[cfg(feature = "jpeg")]
@@ -10,6 +10,14 @@ use crate::error::{Error, Result};
 use crate::header::ByteOrder;
 use tiff_core::{Compression, Predictor};
 
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(feature = "webp"), allow(dead_code))]
+pub(crate) struct WebPDecodeLayout {
+    pub width: usize,
+    pub height: usize,
+    pub samples_per_pixel: usize,
+}
+
 /// Decompress a strip or tile according to the TIFF compression scheme.
 pub fn decompress(
     compression: u16,
@@ -17,6 +25,24 @@ pub fn decompress(
     index: usize,
     _jpeg_tables: Option<&[u8]>,
     decoded_len_limit: usize,
+) -> Result<Vec<u8>> {
+    decompress_with_webp_layout(
+        compression,
+        data,
+        index,
+        _jpeg_tables,
+        decoded_len_limit,
+        None,
+    )
+}
+
+pub(crate) fn decompress_with_webp_layout(
+    compression: u16,
+    data: &[u8],
+    index: usize,
+    _jpeg_tables: Option<&[u8]>,
+    decoded_len_limit: usize,
+    _webp_layout: Option<WebPDecodeLayout>,
 ) -> Result<Vec<u8>> {
     match Compression::from_code(compression) {
         Some(Compression::None) => {
@@ -47,6 +73,10 @@ pub fn decompress(
         Some(Compression::Zstd) => decompress_zstd(data, index, decoded_len_limit),
         #[cfg(not(feature = "zstd"))]
         Some(Compression::Zstd) => Err(Error::UnsupportedCompression(compression)),
+        #[cfg(feature = "webp")]
+        Some(Compression::WebP) => decompress_webp(data, index, decoded_len_limit, _webp_layout),
+        #[cfg(not(feature = "webp"))]
+        Some(Compression::WebP) => Err(Error::UnsupportedCompression(compression)),
         None => Err(Error::UnsupportedCompression(compression)),
     }
 }
@@ -277,6 +307,96 @@ fn decompress_zstd(data: &[u8], index: usize, decoded_len_limit: usize) -> Resul
         }
     })?;
     read_bounded_to_end(decoder, index, "ZSTD", decoded_len_limit)
+}
+
+#[cfg(feature = "webp")]
+fn decompress_webp(
+    data: &[u8],
+    index: usize,
+    decoded_len_limit: usize,
+    expected_layout: Option<WebPDecodeLayout>,
+) -> Result<Vec<u8>> {
+    let mut decoder = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        image_webp::WebPDecoder::new(Cursor::new(data))
+    }))
+    .map_err(|payload| Error::DecompressionFailed {
+        index,
+        reason: format!(
+            "WebP decoder panicked: {}",
+            webp_panic_payload_message(payload.as_ref())
+        ),
+    })?
+    .map_err(|error| Error::DecompressionFailed {
+        index,
+        reason: format!("WebP: {error}"),
+    })?;
+
+    if decoder.is_animated() {
+        return Err(Error::DecompressionFailed {
+            index,
+            reason: "WebP: animated payloads are not valid TIFF blocks".into(),
+        });
+    }
+    if let Some(expected) = expected_layout {
+        let (actual_width, actual_height) = decoder.dimensions();
+        if actual_width as usize != expected.width || actual_height as usize != expected.height {
+            return Err(Error::DecompressionFailed {
+                index,
+                reason: format!(
+                    "WebP dimensions {actual_width}x{actual_height} do not match TIFF block {}x{}",
+                    expected.width, expected.height
+                ),
+            });
+        }
+        let actual_samples = if decoder.has_alpha() { 4 } else { 3 };
+        if actual_samples != expected.samples_per_pixel {
+            return Err(Error::DecompressionFailed {
+                index,
+                reason: format!(
+                    "WebP channel count {actual_samples} does not match TIFF block channel count {}",
+                    expected.samples_per_pixel
+                ),
+            });
+        }
+    }
+
+    let output_len = decoder
+        .output_buffer_size()
+        .ok_or_else(|| Error::DecompressionFailed {
+            index,
+            reason: "WebP output size overflows usize".into(),
+        })?;
+    if output_len > decoded_len_limit {
+        return Err(decoded_block_too_large(index, "WebP", decoded_len_limit));
+    }
+
+    let mut out = vec![0u8; output_len];
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        decoder.read_image(&mut out)
+    }))
+    .map_err(|payload| Error::DecompressionFailed {
+        index,
+        reason: format!(
+            "WebP decoder panicked: {}",
+            webp_panic_payload_message(payload.as_ref())
+        ),
+    })?
+    .map_err(|error| Error::DecompressionFailed {
+        index,
+        reason: format!("WebP: {error}"),
+    })?;
+    Ok(out)
+}
+
+#[cfg(feature = "webp")]
+fn webp_panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic payload".into()
+    }
 }
 
 fn read_bounded_to_end<R: Read>(
