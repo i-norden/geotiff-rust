@@ -607,7 +607,7 @@ fn plan_cog_layout_for_variant(
         let tags = build_cog_image_tags(image, is_bigtiff)?;
         current = checked_add_u64(
             current,
-            encoder::estimate_ifd_size(ByteOrder::LittleEndian, is_bigtiff, &tags),
+            encoder::estimate_ifd_size(ByteOrder::LittleEndian, is_bigtiff, &tags)?,
             "COG IFD layout",
         )?;
         if !is_bigtiff {
@@ -715,7 +715,7 @@ fn emit_cog<W: Write + Seek>(
         let (offsets_tag_code, byte_counts_tag_code) = image.builder.offset_tag_codes();
 
         if image.blocks.len() == 1 {
-            if let Some(off) = encoder::find_inline_tag_value_offset(
+            if let Some(off) = encoder::find_tag_value_offset(
                 ifd_result.ifd_offset,
                 layout.is_bigtiff,
                 &planned.tags,
@@ -734,7 +734,7 @@ fn emit_cog<W: Write + Seek>(
                     ))?;
                 }
             }
-            if let Some(off) = encoder::find_inline_tag_value_offset(
+            if let Some(off) = encoder::find_tag_value_offset(
                 ifd_result.ifd_offset,
                 layout.is_bigtiff,
                 &planned.tags,
@@ -1205,13 +1205,20 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
         let expected_h = (self.height as usize).saturating_sub(y_off).min(th);
         let expected_w = (self.width as usize).saturating_sub(x_off).min(tw);
         if data_h > expected_h || data_w > expected_w {
-            return Err(Error::Other(format!(
-                "tile data shape {}x{} exceeds raster bounds for tile starting at ({x_off},{y_off}); expected at most {}x{}",
-                data_h, data_w, expected_h, expected_w
-            )));
+            return Err(Error::TileShapeMismatch {
+                x_off,
+                y_off,
+                expected_height: expected_h,
+                expected_width: expected_w,
+                actual_height: data_h,
+                actual_width: data_w,
+            });
         }
 
         let tile_index = tile_row * self.tiles_across as usize + tile_col;
+        if self.written[tile_index] {
+            return Err(Error::TileAlreadyWritten { x_off, y_off });
+        }
         let mut padded = self.fill_block.clone();
         crate::raster_copy::copy_2d_region_into(
             data,
@@ -1262,10 +1269,14 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
         let expected_h = (self.height as usize).saturating_sub(y_off).min(th);
         let expected_w = (self.width as usize).saturating_sub(x_off).min(tw);
         if data_h > expected_h || data_w > expected_w {
-            return Err(Error::Other(format!(
-                "tile data shape {}x{} exceeds raster bounds for tile starting at ({x_off},{y_off}); expected at most {}x{}",
-                data_h, data_w, expected_h, expected_w
-            )));
+            return Err(Error::TileShapeMismatch {
+                x_off,
+                y_off,
+                expected_height: expected_h,
+                expected_width: expected_w,
+                actual_height: data_h,
+                actual_width: data_w,
+            });
         }
         if data_b != bands {
             return Err(Error::DataSizeMismatch {
@@ -1275,6 +1286,9 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
         }
 
         let tile_index = tile_row * self.tiles_across as usize + tile_col;
+        if self.written[tile_index] {
+            return Err(Error::TileAlreadyWritten { x_off, y_off });
+        }
         if matches!(
             self.planar_configuration,
             tiff_core::PlanarConfiguration::Planar

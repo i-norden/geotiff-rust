@@ -24,6 +24,21 @@ pub enum Error {
         height: u32,
     },
 
+    #[error(
+        "tile ({x_off},{y_off}) has shape {actual_height}x{actual_width}; expected {expected_height}x{expected_width}"
+    )]
+    TileShapeMismatch {
+        x_off: usize,
+        y_off: usize,
+        expected_height: usize,
+        expected_width: usize,
+        actual_height: usize,
+        actual_width: usize,
+    },
+
+    #[error("tile ({x_off},{y_off}) has already been written")]
+    TileAlreadyWritten { x_off: usize, y_off: usize },
+
     #[error("data size mismatch: expected {expected}, got {actual}")]
     DataSizeMismatch { expected: usize, actual: usize },
 
