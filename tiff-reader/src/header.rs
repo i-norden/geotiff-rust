@@ -64,9 +64,16 @@ impl TiffHeader {
                 }
                 let offset_size = read_u16(4);
                 if offset_size != 8 {
-                    return Err(Error::UnsupportedVersion(version));
+                    return Err(Error::InvalidBigTiffHeader(format!(
+                        "offset size must be 8, found {offset_size}"
+                    )));
                 }
-                // bytes 6-7: reserved (must be 0)
+                let reserved = read_u16(6);
+                if reserved != 0 {
+                    return Err(Error::InvalidBigTiffHeader(format!(
+                        "reserved field must be zero, found {reserved}"
+                    )));
+                }
                 let read_u64 = |offset: usize| -> u64 {
                     let bytes: [u8; 8] = data[offset..offset + 8].try_into().unwrap();
                     match byte_order {
@@ -129,5 +136,26 @@ mod tests {
     fn reject_invalid_magic() {
         let data = b"XX\x2a\x00\x08\x00\x00\x00";
         assert!(TiffHeader::parse(data).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_bigtiff_offset_size_and_reserved_field() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"II");
+        data.extend_from_slice(&43u16.to_le_bytes());
+        data.extend_from_slice(&4u16.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&16u64.to_le_bytes());
+        assert!(matches!(
+            TiffHeader::parse(&data),
+            Err(Error::InvalidBigTiffHeader(message)) if message.contains("offset size")
+        ));
+
+        data[4..6].copy_from_slice(&8u16.to_le_bytes());
+        data[6..8].copy_from_slice(&1u16.to_le_bytes());
+        assert!(matches!(
+            TiffHeader::parse(&data),
+            Err(Error::InvalidBigTiffHeader(message)) if message.contains("reserved")
+        ));
     }
 }

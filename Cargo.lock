@@ -1590,6 +1590,7 @@ dependencies = [
  "flate2",
  "image-webp",
  "jpeg-decoder",
+ "jpeg-encoder",
  "lerc-core",
  "lerc-reader",
  "lru",

@@ -47,3 +47,6 @@ optional = true
 [dependencies.image-webp]
 version = "0.2"
 optional = true
+
+[dev-dependencies]
+jpeg-encoder = "0.6"

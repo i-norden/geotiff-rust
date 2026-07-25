@@ -11,8 +11,8 @@ use crate::header::ByteOrder;
 use tiff_core::{Compression, Predictor};
 
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(not(feature = "webp"), allow(dead_code))]
-pub(crate) struct WebPDecodeLayout {
+#[cfg_attr(not(any(feature = "jpeg", feature = "webp")), allow(dead_code))]
+pub(crate) struct ImageDecodeLayout {
     pub width: usize,
     pub height: usize,
     pub samples_per_pixel: usize,
@@ -26,7 +26,7 @@ pub fn decompress(
     _jpeg_tables: Option<&[u8]>,
     decoded_len_limit: usize,
 ) -> Result<Vec<u8>> {
-    decompress_with_webp_layout(
+    decompress_with_layout(
         compression,
         data,
         index,
@@ -36,14 +36,16 @@ pub fn decompress(
     )
 }
 
-pub(crate) fn decompress_with_webp_layout(
+pub(crate) fn decompress_with_layout(
     compression: u16,
     data: &[u8],
     index: usize,
     _jpeg_tables: Option<&[u8]>,
     decoded_len_limit: usize,
-    _webp_layout: Option<WebPDecodeLayout>,
+    expected_layout: Option<ImageDecodeLayout>,
 ) -> Result<Vec<u8>> {
+    // The value is consumed only by feature-gated image codecs.
+    let _ = expected_layout;
     match Compression::from_code(compression) {
         Some(Compression::None) => {
             if data.len() > decoded_len_limit {
@@ -64,7 +66,13 @@ pub(crate) fn decompress_with_webp_layout(
         #[cfg(feature = "jpeg")]
         Some(Compression::OldJpeg) => Err(Error::UnsupportedCompression(compression)),
         #[cfg(feature = "jpeg")]
-        Some(Compression::Jpeg) => decompress_jpeg(data, index, _jpeg_tables, decoded_len_limit),
+        Some(Compression::Jpeg) => decompress_jpeg(
+            data,
+            index,
+            _jpeg_tables,
+            decoded_len_limit,
+            expected_layout,
+        ),
         #[cfg(not(feature = "jpeg"))]
         Some(Compression::OldJpeg | Compression::Jpeg) => {
             Err(Error::UnsupportedCompression(compression))
@@ -74,7 +82,7 @@ pub(crate) fn decompress_with_webp_layout(
         #[cfg(not(feature = "zstd"))]
         Some(Compression::Zstd) => Err(Error::UnsupportedCompression(compression)),
         #[cfg(feature = "webp")]
-        Some(Compression::WebP) => decompress_webp(data, index, decoded_len_limit, _webp_layout),
+        Some(Compression::WebP) => decompress_webp(data, index, decoded_len_limit, expected_layout),
         #[cfg(not(feature = "webp"))]
         Some(Compression::WebP) => Err(Error::UnsupportedCompression(compression)),
         None => Err(Error::UnsupportedCompression(compression)),
@@ -256,13 +264,14 @@ fn decompress_jpeg(
     index: usize,
     jpeg_tables: Option<&[u8]>,
     decoded_len_limit: usize,
+    expected_layout: Option<ImageDecodeLayout>,
 ) -> Result<Vec<u8>> {
     let stream = merge_jpeg_stream(jpeg_tables, data);
     panic::catch_unwind(AssertUnwindSafe(|| {
         let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(stream));
         decoder.set_max_decoding_buffer_size(decoded_len_limit);
         decoder.read_info()?;
-        validate_jpeg_metadata_budget(&decoder, decoded_len_limit)?;
+        validate_jpeg_metadata(&decoder, decoded_len_limit, expected_layout)?;
         decoder.decode()
     }))
     .map_err(|payload| Error::DecompressionFailed {
@@ -279,9 +288,10 @@ fn decompress_jpeg(
 }
 
 #[cfg(feature = "jpeg")]
-fn validate_jpeg_metadata_budget<R: std::io::Read>(
+fn validate_jpeg_metadata<R: std::io::Read>(
     decoder: &jpeg_decoder::Decoder<R>,
     decoded_len_limit: usize,
+    expected_layout: Option<ImageDecodeLayout>,
 ) -> std::result::Result<(), jpeg_decoder::Error> {
     let info = decoder.info().ok_or_else(|| {
         jpeg_decoder::Error::Format("JPEG metadata missing after read_info".into())
@@ -294,6 +304,22 @@ fn validate_jpeg_metadata_budget<R: std::io::Read>(
         return Err(jpeg_decoder::Error::Format(format!(
             "JPEG decoded size {decoded_len} exceeds TIFF block budget {decoded_len_limit}"
         )));
+    }
+    if let Some(expected) = expected_layout {
+        if usize::from(info.width) != expected.width || usize::from(info.height) != expected.height
+        {
+            return Err(jpeg_decoder::Error::Format(format!(
+                "JPEG dimensions {}x{} do not match TIFF block {}x{}",
+                info.width, info.height, expected.width, expected.height
+            )));
+        }
+        if info.pixel_format.pixel_bytes() != expected.samples_per_pixel {
+            return Err(jpeg_decoder::Error::Format(format!(
+                "JPEG channel count {} does not match TIFF block channel count {}",
+                info.pixel_format.pixel_bytes(),
+                expected.samples_per_pixel
+            )));
+        }
     }
     Ok(())
 }
@@ -314,7 +340,7 @@ fn decompress_webp(
     data: &[u8],
     index: usize,
     decoded_len_limit: usize,
-    expected_layout: Option<WebPDecodeLayout>,
+    expected_layout: Option<ImageDecodeLayout>,
 ) -> Result<Vec<u8>> {
     let mut decoder = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         image_webp::WebPDecoder::new(Cursor::new(data))

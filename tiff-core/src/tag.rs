@@ -211,7 +211,7 @@ impl TagValue {
         match self {
             Self::Short(v) => v.first().copied(),
             Self::Byte(v) => v.first().map(|&b| b as u16),
-            Self::Long(v) => v.first().map(|&l| l as u16),
+            Self::Long(v) => v.first().and_then(|&l| u16::try_from(l).ok()),
             _ => None,
         }
     }
@@ -331,5 +331,19 @@ impl TagValue {
             Self::Rational(v) => Some(v.as_slice()),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TagValue;
+
+    #[test]
+    fn as_u16_rejects_out_of_range_long_values() {
+        assert_eq!(
+            TagValue::Long(vec![u16::MAX as u32]).as_u16(),
+            Some(u16::MAX)
+        );
+        assert_eq!(TagValue::Long(vec![u16::MAX as u32 + 1]).as_u16(), None);
     }
 }

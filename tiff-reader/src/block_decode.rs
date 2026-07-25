@@ -99,20 +99,22 @@ pub(crate) fn decode_compressed_block(request: BlockDecodeRequest<'_>) -> Result
     let expected_len = expected_encoded_block_len(&request, samples)?;
 
     if request.context.compression != Some(Compression::Lerc) {
-        let webp_layout = (request.context.compression == Some(Compression::WebP)).then_some(
-            filters::WebPDecodeLayout {
-                width: request.block_width,
-                height: request.block_height,
-                samples_per_pixel: samples,
-            },
-        );
-        let mut decoded = filters::decompress_with_webp_layout(
+        let image_layout = matches!(
+            request.context.compression,
+            Some(Compression::Jpeg | Compression::WebP)
+        )
+        .then_some(filters::ImageDecodeLayout {
+            width: request.block_width,
+            height: request.block_height,
+            samples_per_pixel: samples,
+        });
+        let mut decoded = filters::decompress_with_layout(
             request.context.compression_code,
             request.compressed,
             request.index,
             request.context.jpeg_tables,
             expected_len,
-            webp_layout,
+            image_layout,
         )?;
         if decoded.len() < expected_len {
             return Err(Error::DecompressionFailed {

@@ -1862,6 +1862,30 @@ mod tests {
     }
 
     #[test]
+    fn decode_output_budget_also_bounds_intersecting_storage_blocks() {
+        let tile = vec![7u8; 16 * 16];
+        let file = TiffFile::from_bytes_with_options(
+            build_tiled_tiff(16, 16, 16, 16, &[&tile]),
+            OpenOptions {
+                decode_output_bytes: 16,
+                ..OpenOptions::default()
+            },
+        )
+        .unwrap();
+
+        // The requested window is one byte, but servicing it requires
+        // decoding the intersecting 256-byte tile.
+        let err = file.read_window_bytes(0, 0, 0, 1, 1).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::DecodeOutputTooLarge {
+                requested: 256,
+                limit: 16
+            }
+        ));
+    }
+
+    #[test]
     fn decode_output_budget_rejects_large_color_decoded_output() {
         let mut color_map = Vec::new();
         color_map.extend((0u16..16).map(|value| value * 17 * 257));
@@ -2362,6 +2386,30 @@ mod tests {
                 (262, 3, 1, inline_short(2)),
                 (277, 3, 1, inline_short(3)),
             ],
+        );
+        let file = TiffFile::from_bytes(data).unwrap();
+        let error = file.read_image::<u8>(0).unwrap_err();
+        assert!(error.to_string().contains("dimensions 8x32"), "{error}");
+    }
+
+    #[cfg(feature = "jpeg")]
+    #[test]
+    fn rejects_jpeg_payload_dimensions_that_do_not_match_tile() {
+        let pixels = vec![17u8; 8 * 32];
+        let mut jpeg = Vec::new();
+        jpeg_encoder::Encoder::new(&mut jpeg, 80)
+            .encode(&pixels, 8, 32, jpeg_encoder::ColorType::Luma)
+            .unwrap();
+
+        // The pixel count matches 16x16, so a byte-length-only validation
+        // would accept the block and silently reinterpret its row geometry.
+        let data = build_tiled_tiff_with_overrides(
+            16,
+            16,
+            16,
+            16,
+            &[&jpeg],
+            &[(259, 3, 1, inline_short(7))],
         );
         let file = TiffFile::from_bytes(data).unwrap();
         let error = file.read_image::<u8>(0).unwrap_err();
