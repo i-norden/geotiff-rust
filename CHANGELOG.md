@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.0 - 2026-07-22
+## 0.8.0 - 2026-07-25
 
 Breaking changes:
 
@@ -8,9 +8,13 @@ Breaking changes:
 - remove the `ImageBuilder` helpers deprecated since 0.6.0 (`block_count`, `block_sample_count`, `estimated_uncompressed_bytes`, `layout_tags`, `build_tags`); use the `checked_*` equivalents
 - collapse duplicate reader methods: `read_*_samples` and `read_*_sample_bytes` aliases fold into `read_image` / `read_window` / `read_band*` and the `*_bytes` variants on `TiffFile` and `GeoTiffFile`
 - `Ifd::rows_per_strip` returns `u32` (it always resolved to a value); `Ifd::bits_per_sample` / `Ifd::sample_format` are now the validating `Result` accessors introduced in this release
+- `Ifd::index` is now `Option<usize>`: top-level chain IFDs have `Some(index)`, while IFDs read directly by offset (including SubIFDs) have no fabricated chain index
 - `GeoTiffBuilder::write_2d`/`write_3d` require `NumericSample` (implemented for every supported sample type) so plain GeoTIFF writes validate nodata and pad edge blocks with the nodata fill
 - `BlockKey.ifd_index` is now `BlockKey.ifd_offset: u64` and `BlockEncodingOptions` gains a `deflate_level` field
-- remove unused `geotiff_reader::Error` variants (`UnsupportedModelType`, `UnknownEpsg`, `BandOutOfBounds`, `NoGeoTransform`); `lru`/`parking_lot` are only pulled in by the `cog` feature and `memmap2`/`smallvec` dependencies are dropped
+- `WriteOptions::auto()` no longer accepts an unused estimated-size argument; final TIFF/BigTIFF selection always uses the exact completed layout
+- `tiff_writer::encoder::estimate_ifd_size` is fallible and reports arithmetic overflow instead of wrapping an unrepresentable layout
+- predictor setters no longer silently discard requests made after selecting JPEG or LERC; incompatible combinations are retained and rejected during validation
+- remove unused `geotiff_reader::Error` variants (`UnsupportedModelType`, `UnknownEpsg`, `BandOutOfBounds`, `NoGeoTransform`); `lru`/`parking_lot` are only pulled in by remote COG features and direct `memmap2`/`smallvec` dependencies are dropped
 
 Other changes:
 
@@ -30,6 +34,14 @@ Other changes:
 - fix decoded YCbCr chroma scaling to honor the `ReferenceBlackWhite` chroma ranges per TIFF 6.0 (`127/(ReferenceMax - ReferenceZero)` for 8-bit samples) instead of always dividing by the full-scale range; output is unchanged for files using the default headroom-free references
 - read sparse strips and tiles (zero offset or zero byte count, as written by GDAL `SPARSE_OK=TRUE`) as implicit zero-filled blocks instead of failing with a decode error
 - fix decoded-block cache collisions between top-level chain IFDs and IFDs parsed at explicit file offsets (such as SubIFD overviews) by keying the cache on the IFD file offset; `BlockKey.ifd_index` is now `BlockKey.ifd_offset: u64` and `Ifd::offset()` exposes the owning file offset
+- enforce the decoded-output budget for every intersecting storage block, and reject JPEG payloads whose encoded dimensions do not match the TIFF strip/tile geometry
+- validate BigTIFF offset-size/reserved header fields, duplicate IFD tags, scalar LONG-to-SHORT range conversions, writer tag type/count coherence, block row geometry, and extra-tag conflicts before mutation or allocation
+- reject unsupported or feature-disabled writer codecs and predictors without compression during image validation instead of failing after streaming begins
+- bind image handles to their originating writer and reject repeated sparse, compressed, or raw block writes before appending payload bytes
+- validate GeoKey headers, duplicate keys, inline counts, ASCII parameters, model tag types/counts, finite invertible transforms, and positive model pixel scales; preserve flipped/tiny-skew transforms with ModelTransformation instead of lossy tiepoint conversion
+- fix overview discovery so candidates cannot grow either raster dimension and the same IFD referenced by both the top-level and SubIFD chains is reported only once
+- preserve exact `u64`/`i64` nodata text at numeric limits, reject rounded out-of-range boundaries, and make later pixel-scale/origin/tiepoint builder calls replace an earlier transformation matrix
+- keep the async-only COG feature free of reqwest's blocking client implementation and document the complete `f16`, WebP, and async COG feature surface
 
 ## 0.7.0 - 2026-06-20
 

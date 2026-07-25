@@ -21,6 +21,7 @@ cargo test -p tiff-reader --no-default-features
 cargo test -p tiff-writer --no-default-features
 cargo test -p geotiff-reader --no-default-features
 cargo test -p geotiff-reader --no-default-features --features cog
+cargo test -p geotiff-reader --no-default-features --features cog-async
 cargo doc --workspace --all-features --no-deps
 ./scripts/fetch-interoperability-corpus.sh --verify-only
 ./scripts/run-reference-parity.sh
@@ -33,6 +34,7 @@ cargo clippy --manifest-path fuzz/Cargo.toml --bins --locked -- -D warnings
   cd fuzz
   cargo fuzz run tiff_open corpus/tiff_open -- -max_total_time=60
   cargo fuzz run geotiff_open corpus/geotiff_open -- -max_total_time=60
+  cargo fuzz run geotiff_subifd_overviews -- -max_total_time=60
 )
 cargo package -p tiff-core
 cargo package -p geotiff-core
