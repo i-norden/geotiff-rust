@@ -1,5 +1,7 @@
 //! Image builder for configuring a single TIFF IFD.
 
+use std::collections::HashSet;
+
 use tiff_core::*;
 
 use crate::encoder;
@@ -140,10 +142,7 @@ impl ImageBuilder {
     }
 
     pub fn predictor(mut self, p: Predictor) -> Self {
-        // LERC and JPEG do not use TIFF predictors; ignore the request.
-        if !matches!(self.compression, Compression::Lerc | Compression::Jpeg) {
-            self.predictor = p;
-        }
+        self.predictor = p;
         self
     }
 
@@ -285,6 +284,13 @@ impl ImageBuilder {
 
     /// Checked expected number of samples for the block at `index`.
     pub fn checked_block_sample_count(&self, index: usize) -> crate::error::Result<usize> {
+        let block_count = self.checked_block_count()?;
+        if index >= block_count {
+            return Err(crate::error::Error::BlockIndexOutOfRange {
+                index,
+                total: block_count,
+            });
+        }
         let samples_per_pixel = self.block_samples_per_pixel() as usize;
         let plane_block_index = self.checked_block_plane_index(index)?;
         match self.checked_layout()? {
@@ -315,7 +321,7 @@ impl ImageBuilder {
 
     /// Checked estimated uncompressed image bytes.
     pub fn checked_estimated_uncompressed_bytes(&self) -> crate::error::Result<u64> {
-        let bps = (self.bits_per_sample / 8).max(1) as u64;
+        let bps = u64::from(self.bits_per_sample.div_ceil(8));
         (self.width as u64)
             .checked_mul(self.height as u64)
             .and_then(|value| value.checked_mul(self.samples_per_pixel as u64))
@@ -459,19 +465,28 @@ impl ImageBuilder {
         }
     }
 
-    /// Height of the block at `index` in pixels.
+    /// Checked height of the block at `index` in pixels.
     ///
     /// Tiles are always full-sized (padded at edges). Strips may be shorter
     /// for the final strip.
-    pub fn block_height(&self, index: usize) -> u32 {
-        match self.layout {
-            DataLayout::Tiles { height, .. } => height,
+    pub fn checked_block_height(&self, index: usize) -> crate::error::Result<u32> {
+        let block_count = self.checked_block_count()?;
+        if index >= block_count {
+            return Err(crate::error::Error::BlockIndexOutOfRange {
+                index,
+                total: block_count,
+            });
+        }
+        match self.checked_layout()? {
+            DataLayout::Tiles { height, .. } => Ok(height),
             DataLayout::Strips { rows_per_strip } => {
-                let plane_index = self.checked_block_plane_index(index).unwrap_or(index);
-                let rps = rows_per_strip.max(1) as usize;
-                let start_row = plane_index.saturating_mul(rps);
+                let plane_index = self.checked_block_plane_index(index)?;
+                let rps = rows_per_strip as usize;
+                let start_row = plane_index
+                    .checked_mul(rps)
+                    .ok_or_else(|| layout_overflow("strip start row"))?;
                 let remaining = (self.height as usize).saturating_sub(start_row);
-                remaining.min(rps) as u32
+                Ok(remaining.min(rps) as u32)
             }
         }
     }
@@ -525,6 +540,7 @@ impl ImageBuilder {
                 "samples_per_pixel must be greater than zero".into(),
             ));
         }
+        self.validate_extra_tags()?;
         if !matches!(self.bits_per_sample, 8 | 16 | 32 | 64) {
             return Err(crate::error::Error::InvalidConfig(format!(
                 "bits_per_sample must be 8, 16, 32, or 64, got {}",
@@ -556,6 +572,28 @@ impl ImageBuilder {
         self.checked_block_count()?;
         self.checked_block_sample_count(0)?;
         self.checked_estimated_uncompressed_bytes()?;
+        match self.compression {
+            Compression::None
+            | Compression::Lzw
+            | Compression::Deflate
+            | Compression::DeflateOld
+            | Compression::Lerc => {}
+            Compression::Jpeg if cfg!(feature = "jpeg") => {}
+            Compression::Zstd if cfg!(feature = "zstd") => {}
+            unsupported => {
+                return Err(crate::error::Error::InvalidConfig(format!(
+                    "{} compression is not supported by this writer build",
+                    unsupported.name()
+                )))
+            }
+        }
+        if !matches!(self.predictor, Predictor::None)
+            && matches!(self.compression, Compression::None)
+        {
+            return Err(crate::error::Error::InvalidConfig(
+                "TIFF predictors require a supported compression scheme".into(),
+            ));
+        }
         if matches!(self.compression, Compression::Lerc)
             && !matches!(self.predictor, Predictor::None)
         {
@@ -604,12 +642,6 @@ impl ImageBuilder {
             }
             Predictor::None => {}
         }
-        if matches!(self.compression, Compression::OldJpeg) {
-            return Err(crate::error::Error::InvalidConfig(
-                "Old-style JPEG compression is not supported for writing; use Compression::Jpeg"
-                    .into(),
-            ));
-        }
         if let Some(level) = self.deflate_level {
             if level > 9 {
                 return Err(crate::error::Error::InvalidConfig(format!(
@@ -628,6 +660,57 @@ impl ImageBuilder {
         self.validate_color_model()?;
         if matches!(self.compression, Compression::Jpeg) {
             self.validate_jpeg_config()?;
+        }
+        Ok(())
+    }
+
+    fn validate_extra_tags(&self) -> crate::error::Result<()> {
+        const MANAGED_TAGS: &[u16] = &[
+            TAG_NEW_SUBFILE_TYPE,
+            TAG_IMAGE_WIDTH,
+            TAG_IMAGE_LENGTH,
+            TAG_BITS_PER_SAMPLE,
+            TAG_COMPRESSION,
+            TAG_PHOTOMETRIC_INTERPRETATION,
+            TAG_STRIP_OFFSETS,
+            TAG_SAMPLES_PER_PIXEL,
+            TAG_ROWS_PER_STRIP,
+            TAG_STRIP_BYTE_COUNTS,
+            TAG_PLANAR_CONFIGURATION,
+            TAG_PREDICTOR,
+            TAG_COLOR_MAP,
+            TAG_TILE_WIDTH,
+            TAG_TILE_LENGTH,
+            TAG_TILE_OFFSETS,
+            TAG_TILE_BYTE_COUNTS,
+            TAG_INK_SET,
+            TAG_EXTRA_SAMPLES,
+            TAG_SAMPLE_FORMAT,
+            TAG_YCBCR_SUBSAMPLING,
+            TAG_YCBCR_POSITIONING,
+            TAG_LERC_PARAMETERS,
+        ];
+
+        let mut seen = HashSet::with_capacity(self.extra_tags.len());
+        for tag in &self.extra_tags {
+            if !seen.insert(tag.code) {
+                return Err(crate::error::Error::InvalidConfig(format!(
+                    "extra TIFF tag {} is defined more than once",
+                    tag.code
+                )));
+            }
+            if MANAGED_TAGS.contains(&tag.code) {
+                return Err(crate::error::Error::InvalidConfig(format!(
+                    "TIFF tag {} is managed by ImageBuilder and cannot be supplied as an extra tag",
+                    tag.code
+                )));
+            }
+            if tag.tag_type != tag.value.tag_type() || tag.count != tag.value.count() {
+                return Err(crate::error::Error::InvalidConfig(format!(
+                    "extra TIFF tag {} has type/count metadata inconsistent with its value",
+                    tag.code
+                )));
+            }
         }
         Ok(())
     }
@@ -883,7 +966,9 @@ fn layout_overflow(context: &'static str) -> crate::error::Error {
 #[cfg(test)]
 mod tests {
     use super::ImageBuilder;
-    use tiff_core::{PhotometricInterpretation, PlanarConfiguration};
+    use tiff_core::{
+        PhotometricInterpretation, PlanarConfiguration, Tag, TagType, TagValue, TAG_IMAGE_WIDTH,
+    };
 
     #[test]
     fn validate_rejects_zero_strip_and_tile_dimensions() {
@@ -978,6 +1063,103 @@ mod tests {
         assert!(
             matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("requires at least 3 samples"))
         );
+    }
+
+    #[test]
+    fn checked_helpers_reject_out_of_range_block_indices() {
+        let builder = ImageBuilder::new(16, 16).sample_type::<u8>().tiles(16, 16);
+        assert!(matches!(
+            builder.checked_block_sample_count(1),
+            Err(crate::error::Error::BlockIndexOutOfRange { index: 1, total: 1 })
+        ));
+        assert!(matches!(
+            builder.checked_block_height(1),
+            Err(crate::error::Error::BlockIndexOutOfRange { index: 1, total: 1 })
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_conflicting_duplicate_and_incoherent_extra_tags() {
+        let managed =
+            ImageBuilder::new(1, 1).tag(Tag::new(TAG_IMAGE_WIDTH, TagValue::Long(vec![2])));
+        assert!(matches!(
+            managed.validate(),
+            Err(crate::error::Error::InvalidConfig(message)) if message.contains("managed")
+        ));
+
+        let duplicate = ImageBuilder::new(1, 1)
+            .tag(Tag::new(65000, TagValue::Short(vec![1])))
+            .tag(Tag::new(65000, TagValue::Short(vec![2])));
+        assert!(matches!(
+            duplicate.validate(),
+            Err(crate::error::Error::InvalidConfig(message)) if message.contains("more than once")
+        ));
+
+        let mut incoherent = Tag::new(65000, TagValue::Short(vec![1]));
+        incoherent.tag_type = TagType::Long;
+        let incoherent = ImageBuilder::new(1, 1).tag(incoherent);
+        assert!(matches!(
+            incoherent.validate(),
+            Err(crate::error::Error::InvalidConfig(message)) if message.contains("inconsistent")
+        ));
+    }
+
+    #[test]
+    fn unsupported_predictor_requests_are_reported_instead_of_ignored() {
+        let err = ImageBuilder::new(1, 1)
+            .sample_type::<u8>()
+            .compression(tiff_core::Compression::Jpeg)
+            .predictor(tiff_core::Predictor::Horizontal)
+            .validate()
+            .unwrap_err();
+        #[cfg(feature = "jpeg")]
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("JPEG compression does not support"))
+        );
+        #[cfg(not(feature = "jpeg"))]
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("not supported"))
+        );
+
+        let err = ImageBuilder::new(1, 1)
+            .sample_type::<u8>()
+            .predictor(tiff_core::Predictor::Horizontal)
+            .validate()
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InvalidConfig(message) if message.contains("require a supported compression"))
+        );
+    }
+
+    #[test]
+    fn validation_rejects_unsupported_writer_codecs_before_block_writes() {
+        for compression in [
+            tiff_core::Compression::OldJpeg,
+            tiff_core::Compression::PackBits,
+            tiff_core::Compression::WebP,
+        ] {
+            assert!(matches!(
+                ImageBuilder::new(1, 1)
+                    .sample_type::<u8>()
+                    .compression(compression)
+                    .validate(),
+                Err(crate::error::Error::InvalidConfig(message))
+                    if message.contains("not supported")
+            ));
+        }
+
+        #[cfg(not(feature = "jpeg"))]
+        assert!(ImageBuilder::new(1, 1)
+            .sample_type::<u8>()
+            .compression(tiff_core::Compression::Jpeg)
+            .validate()
+            .is_err());
+        #[cfg(not(feature = "zstd"))]
+        assert!(ImageBuilder::new(1, 1)
+            .sample_type::<u8>()
+            .compression(tiff_core::Compression::Zstd)
+            .validate()
+            .is_err());
     }
 
     #[test]

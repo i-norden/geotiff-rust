@@ -23,11 +23,14 @@ pub enum Error {
     #[error("block index {index} is out of range (expected < {total})")]
     BlockIndexOutOfRange { index: usize, total: usize },
 
+    #[error("block {index} has already been written")]
+    BlockAlreadyWritten { index: usize },
+
+    #[error("image handle does not belong to this writer")]
+    InvalidImageHandle,
+
     #[error("not all blocks were written: wrote {written} of {total}")]
     IncompleteImage { written: usize, total: usize },
-
-    #[error("writer has already been finalized")]
-    AlreadyFinalized,
 
     #[error("classic TIFF offset {offset} exceeds 4 GiB limit; use TiffVariant::BigTiff")]
     ClassicOffsetOverflow { offset: u64 },

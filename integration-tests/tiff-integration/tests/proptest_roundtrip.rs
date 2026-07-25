@@ -91,8 +91,9 @@ fn config_strategy() -> impl Strategy<Value = Config> {
                 byte_order,
             )| {
                 let is_float = matches!(sample_type, SampleType::F32 | SampleType::F64);
-                // LERC ignores predictors; otherwise pick one valid for the type.
-                let predictor = if matches!(compression, Compression::Lerc) {
+                // Uncompressed and LERC images do not support predictors;
+                // otherwise pick one valid for the sample type.
+                let predictor = if matches!(compression, Compression::None | Compression::Lerc) {
                     Predictor::None
                 } else {
                     match predictor_choice {

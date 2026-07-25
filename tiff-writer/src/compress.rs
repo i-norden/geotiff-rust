@@ -45,6 +45,32 @@ pub fn compress_block<T: TiffWriteSample>(
     } = options;
 
     validate_deflate_level(compression, deflate_level, index)?;
+    if samples_per_pixel == 0 || row_width_pixels == 0 || T::BYTES_PER_SAMPLE == 0 {
+        return Err(Error::CompressionFailed {
+            index,
+            reason:
+                "block row width, samples per pixel, and sample byte width must be greater than zero"
+                    .into(),
+        });
+    }
+    match predictor {
+        Predictor::Horizontal if T::SAMPLE_FORMAT == 3 => {
+            return Err(Error::CompressionFailed {
+                index,
+                reason: "horizontal predictor requires an integer sample type".into(),
+            });
+        }
+        Predictor::FloatingPoint
+            if T::SAMPLE_FORMAT != 3 || !matches!(T::BITS_PER_SAMPLE, 16 | 32 | 64) =>
+        {
+            return Err(Error::CompressionFailed {
+                index,
+                reason: "floating-point predictor requires a 16-, 32-, or 64-bit float sample type"
+                    .into(),
+            });
+        }
+        _ => {}
+    }
 
     if matches!(compression, Compression::Jpeg) {
         return compress_block_jpeg(
@@ -58,17 +84,46 @@ pub fn compress_block<T: TiffWriteSample>(
     }
 
     let mut encoded = T::encode_slice(samples, byte_order);
-    let row_bytes = row_width_pixels * T::BYTES_PER_SAMPLE * samples_per_pixel as usize;
-    if row_bytes > 0 {
-        for row in encoded.chunks_exact_mut(row_bytes) {
-            apply_forward_predictor(
-                row,
-                predictor,
-                T::BITS_PER_SAMPLE,
-                samples_per_pixel,
-                byte_order,
-            )?;
-        }
+    let expected_encoded_len = samples
+        .len()
+        .checked_mul(T::BYTES_PER_SAMPLE)
+        .ok_or_else(|| Error::CompressionFailed {
+            index,
+            reason: "encoded block byte length overflows usize".into(),
+        })?;
+    if encoded.len() != expected_encoded_len {
+        return Err(Error::CompressionFailed {
+            index,
+            reason: format!(
+                "sample encoder returned {} bytes, expected {expected_encoded_len}",
+                encoded.len()
+            ),
+        });
+    }
+    let row_bytes = row_width_pixels
+        .checked_mul(T::BYTES_PER_SAMPLE)
+        .and_then(|bytes| bytes.checked_mul(usize::from(samples_per_pixel)))
+        .ok_or_else(|| Error::CompressionFailed {
+            index,
+            reason: "block row byte length overflows usize".into(),
+        })?;
+    if encoded.len() % row_bytes != 0 {
+        return Err(Error::CompressionFailed {
+            index,
+            reason: format!(
+                "encoded block byte length {} is not divisible by row byte length {row_bytes}",
+                encoded.len()
+            ),
+        });
+    }
+    for row in encoded.chunks_exact_mut(row_bytes) {
+        apply_forward_predictor(
+            row,
+            predictor,
+            T::BITS_PER_SAMPLE,
+            samples_per_pixel,
+            byte_order,
+        )?;
     }
     compress_with_level(&encoded, compression, deflate_level, index)
 }
@@ -595,6 +650,51 @@ mod tests {
             Error::CompressionFailed { index: 8, reason }
                 if reason.contains("requires Deflate compression")
         ));
+    }
+
+    #[test]
+    fn block_compression_rejects_invalid_row_layouts_and_predictors() {
+        let options = BlockEncodingOptions {
+            byte_order: ByteOrder::LittleEndian,
+            compression: Compression::Deflate,
+            predictor: Predictor::None,
+            samples_per_pixel: 1,
+            row_width_pixels: 2,
+            jpeg_options: None,
+            jpeg_sampling: None,
+            deflate_level: None,
+        };
+        let error = compress_block(&[1u8, 2, 3], options, 4).unwrap_err();
+        assert!(
+            matches!(error, Error::CompressionFailed { index: 4, reason } if reason.contains("not divisible"))
+        );
+
+        let error = compress_block(
+            &[1u16],
+            BlockEncodingOptions {
+                row_width_pixels: usize::MAX,
+                ..options
+            },
+            5,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, Error::CompressionFailed { index: 5, reason } if reason.contains("overflows"))
+        );
+
+        let error = compress_block(
+            &[1.0f32],
+            BlockEncodingOptions {
+                predictor: Predictor::Horizontal,
+                row_width_pixels: 1,
+                ..options
+            },
+            6,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, Error::CompressionFailed { index: 6, reason } if reason.contains("integer"))
+        );
     }
 
     #[cfg(feature = "zstd")]

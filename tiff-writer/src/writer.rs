@@ -1,6 +1,7 @@
 //! Main TiffWriter: orchestrates multi-IFD streaming writes.
 
 use std::io::{Seek, SeekFrom, Write};
+use std::sync::Arc;
 
 use tiff_core::{ByteOrder, Tag};
 
@@ -59,11 +60,7 @@ impl Default for WriteOptions {
 
 impl WriteOptions {
     /// Construct exact auto-selection options.
-    ///
-    /// The `estimated_bytes` parameter is retained for source compatibility,
-    /// but the writer now decides from the exact finalized layout instead of
-    /// an upfront size heuristic.
-    pub fn auto(_estimated_bytes: u64) -> Self {
+    pub fn auto() -> Self {
         Self {
             byte_order: ByteOrder::LittleEndian,
             variant: TiffVariant::Auto,
@@ -74,6 +71,7 @@ impl WriteOptions {
 /// Handle identifying a specific image within the writer.
 #[derive(Debug, Clone)]
 pub struct ImageHandle {
+    owner: Arc<()>,
     pub(crate) index: usize,
 }
 
@@ -90,7 +88,7 @@ pub struct TiffWriter<W: Write + Seek> {
     requested_variant: TiffVariant,
     header_offset: u64,
     images: Vec<IfdState>,
-    finalized: bool,
+    owner: Arc<()>,
 }
 
 impl<W: Write + Seek> TiffWriter<W> {
@@ -113,15 +111,12 @@ impl<W: Write + Seek> TiffWriter<W> {
             requested_variant: options.variant,
             header_offset,
             images: Vec::new(),
-            finalized: false,
+            owner: Arc::new(()),
         })
     }
 
     /// Add an image (IFD) to the file.
     pub fn add_image(&mut self, builder: ImageBuilder) -> Result<ImageHandle> {
-        if self.finalized {
-            return Err(Error::AlreadyFinalized);
-        }
         builder.validate()?;
         let block_count = builder.checked_block_count()?;
 
@@ -131,7 +126,10 @@ impl<W: Write + Seek> TiffWriter<W> {
             builder,
         });
 
-        Ok(ImageHandle { index })
+        Ok(ImageHandle {
+            owner: Arc::clone(&self.owner),
+            index,
+        })
     }
 
     /// Write raw bytes between the reserved header area and the image data.
@@ -140,9 +138,6 @@ impl<W: Write + Seek> TiffWriter<W> {
     /// BigTIFF header footprint up front so the finalized header can switch
     /// variants without relocating block data.
     pub fn write_header_prefix(&mut self, bytes: &[u8]) -> Result<()> {
-        if self.finalized {
-            return Err(Error::AlreadyFinalized);
-        }
         if !self.images.is_empty() {
             return Err(Error::Other(
                 "header prefix bytes must be written before adding images".into(),
@@ -169,13 +164,11 @@ impl<W: Write + Seek> TiffWriter<W> {
         block_index: usize,
         samples: &[T],
     ) -> Result<()> {
-        if self.finalized {
-            return Err(Error::AlreadyFinalized);
-        }
+        let image_index = self.image_index(handle)?;
         let state = self
             .images
-            .get(handle.index)
-            .ok_or(Error::Other("invalid image handle".into()))?;
+            .get(image_index)
+            .ok_or(Error::InvalidImageHandle)?;
 
         let total_blocks = state.block_records.len();
         if block_index >= total_blocks {
@@ -183,6 +176,9 @@ impl<W: Write + Seek> TiffWriter<W> {
                 index: block_index,
                 total: total_blocks,
             });
+        }
+        if state.block_records[block_index].is_some() {
+            return Err(Error::BlockAlreadyWritten { index: block_index });
         }
 
         let expected = state.builder.checked_block_sample_count(block_index)?;
@@ -197,7 +193,7 @@ impl<W: Write + Seek> TiffWriter<W> {
         let compressed = if matches!(state.builder.compression, tiff_core::Compression::Lerc) {
             let opts = state.builder.lerc_options.unwrap_or_default();
             let block_width = state.builder.block_row_width() as u32;
-            let block_height = state.builder.block_height(block_index);
+            let block_height = state.builder.checked_block_height(block_index)?;
             let depth = state.builder.block_samples_per_pixel() as u32;
             compress::compress_block_lerc(
                 samples,
@@ -231,19 +227,20 @@ impl<W: Write + Seek> TiffWriter<W> {
     /// and byte count are stored as zero (GDAL `SPARSE_OK` semantics, where
     /// readers treat such blocks as implicit zero fill).
     pub fn write_block_sparse(&mut self, handle: &ImageHandle, block_index: usize) -> Result<()> {
-        if self.finalized {
-            return Err(Error::AlreadyFinalized);
-        }
+        let image_index = self.image_index(handle)?;
         let state = self
             .images
-            .get_mut(handle.index)
-            .ok_or(Error::Other("invalid image handle".into()))?;
+            .get_mut(image_index)
+            .ok_or(Error::InvalidImageHandle)?;
         let total = state.block_records.len();
         if block_index >= total {
             return Err(Error::BlockIndexOutOfRange {
                 index: block_index,
                 total,
             });
+        }
+        if state.block_records[block_index].is_some() {
+            return Err(Error::BlockAlreadyWritten { index: block_index });
         }
         state.block_records[block_index] = Some((0, 0));
         Ok(())
@@ -256,20 +253,20 @@ impl<W: Write + Seek> TiffWriter<W> {
         block_index: usize,
         compressed_bytes: &[u8],
     ) -> Result<()> {
-        if self.finalized {
-            return Err(Error::AlreadyFinalized);
-        }
-
+        let image_index = self.image_index(handle)?;
         let state = self
             .images
-            .get(handle.index)
-            .ok_or(Error::Other("invalid image handle".into()))?;
+            .get(image_index)
+            .ok_or(Error::InvalidImageHandle)?;
         let total = state.block_records.len();
         if block_index >= total {
             return Err(Error::BlockIndexOutOfRange {
                 index: block_index,
                 total,
             });
+        }
+        if state.block_records[block_index].is_some() {
+            return Err(Error::BlockAlreadyWritten { index: block_index });
         }
 
         let offset = self.sink.seek(SeekFrom::End(0))?;
@@ -283,8 +280,8 @@ impl<W: Write + Seek> TiffWriter<W> {
 
         let state = self
             .images
-            .get_mut(handle.index)
-            .ok_or(Error::Other("invalid image handle".into()))?;
+            .get_mut(image_index)
+            .ok_or(Error::InvalidImageHandle)?;
         state.block_records[block_index] = Some((offset, byte_count));
         Ok(())
     }
@@ -299,20 +296,20 @@ impl<W: Write + Seek> TiffWriter<W> {
         payload: &[u8],
         suffix: &[u8],
     ) -> Result<()> {
-        if self.finalized {
-            return Err(Error::AlreadyFinalized);
-        }
-
+        let image_index = self.image_index(handle)?;
         let state = self
             .images
-            .get(handle.index)
-            .ok_or(Error::Other("invalid image handle".into()))?;
+            .get(image_index)
+            .ok_or(Error::InvalidImageHandle)?;
         let total = state.block_records.len();
         if block_index >= total {
             return Err(Error::BlockIndexOutOfRange {
                 index: block_index,
                 total,
             });
+        }
+        if state.block_records[block_index].is_some() {
+            return Err(Error::BlockAlreadyWritten { index: block_index });
         }
 
         let start = self.sink.seek(SeekFrom::End(0))?;
@@ -337,10 +334,17 @@ impl<W: Write + Seek> TiffWriter<W> {
 
         let state = self
             .images
-            .get_mut(handle.index)
-            .ok_or(Error::Other("invalid image handle".into()))?;
+            .get_mut(image_index)
+            .ok_or(Error::InvalidImageHandle)?;
         state.block_records[block_index] = Some((offset, byte_count));
         Ok(())
+    }
+
+    fn image_index(&self, handle: &ImageHandle) -> Result<usize> {
+        if !Arc::ptr_eq(&self.owner, &handle.owner) || handle.index >= self.images.len() {
+            return Err(Error::InvalidImageHandle);
+        }
+        Ok(handle.index)
     }
 
     fn choose_is_bigtiff(&mut self) -> Result<bool> {
@@ -368,7 +372,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             let tags = state.builder.checked_build_tags(false)?;
             current = checked_add_u64(
                 current,
-                encoder::estimate_ifd_size(self.byte_order, false, &tags),
+                encoder::estimate_ifd_size(self.byte_order, false, &tags)?,
                 "classic IFD layout",
             )?;
             if current > CLASSIC_TIFF_LIMIT {
@@ -392,7 +396,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             let tags = state.builder.checked_build_tags(false)?;
             current = checked_add_u64(
                 current,
-                encoder::estimate_ifd_size(self.byte_order, false, &tags),
+                encoder::estimate_ifd_size(self.byte_order, false, &tags)?,
                 "classic IFD layout",
             )?;
             classic_offset_u32(current)?;
@@ -425,11 +429,6 @@ impl<W: Write + Seek> TiffWriter<W> {
 
     /// Finalize the TIFF file. Emits the IFD chain and patches the header.
     pub fn finish(mut self) -> Result<W> {
-        if self.finalized {
-            return Err(Error::AlreadyFinalized);
-        }
-        self.finalized = true;
-
         for state in &self.images {
             let total = state.block_records.len();
             let written = state
@@ -466,7 +465,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             let (offsets_tag_code, byte_counts_tag_code) = state.builder.offset_tag_codes();
 
             if offsets.len() == 1 {
-                if let Some(off) = encoder::find_inline_tag_value_offset(
+                if let Some(off) = encoder::find_tag_value_offset(
                     ifd_result.ifd_offset,
                     is_bigtiff,
                     tags,
@@ -482,7 +481,7 @@ impl<W: Write + Seek> TiffWriter<W> {
                         )?;
                     }
                 }
-                if let Some(off) = encoder::find_inline_tag_value_offset(
+                if let Some(off) = encoder::find_tag_value_offset(
                     ifd_result.ifd_offset,
                     is_bigtiff,
                     tags,
@@ -644,6 +643,41 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, Error::BlockIndexOutOfRange { .. }));
+        assert_eq!(writer.sink.get_ref().len(), len_before);
+    }
+
+    #[test]
+    fn image_handles_are_bound_to_their_writer() {
+        let mut first = TiffWriter::new(Cursor::new(Vec::new()), WriteOptions::default()).unwrap();
+        let handle = first
+            .add_image(ImageBuilder::new(1, 1).sample_type::<u8>().strips(1))
+            .unwrap();
+        let mut second = TiffWriter::new(Cursor::new(Vec::new()), WriteOptions::default()).unwrap();
+        second
+            .add_image(ImageBuilder::new(1, 1).sample_type::<u8>().strips(1))
+            .unwrap();
+
+        let len_before = second.sink.get_ref().len();
+        assert!(matches!(
+            second.write_block(&handle, 0, &[1u8]),
+            Err(Error::InvalidImageHandle)
+        ));
+        assert_eq!(second.sink.get_ref().len(), len_before);
+    }
+
+    #[test]
+    fn duplicate_blocks_are_rejected_before_mutating_the_sink() {
+        let mut writer = TiffWriter::new(Cursor::new(Vec::new()), WriteOptions::default()).unwrap();
+        let handle = writer
+            .add_image(ImageBuilder::new(1, 1).sample_type::<u8>().strips(1))
+            .unwrap();
+        writer.write_block(&handle, 0, &[1u8]).unwrap();
+
+        let len_before = writer.sink.get_ref().len();
+        assert!(matches!(
+            writer.write_block_raw(&handle, 0, &[2u8]),
+            Err(Error::BlockAlreadyWritten { index: 0 })
+        ));
         assert_eq!(writer.sink.get_ref().len(), len_before);
     }
 }
