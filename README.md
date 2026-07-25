@@ -131,7 +131,7 @@ with `bands(...)` and optional
 - Compression: Deflate, LZW, JPEG (optional), LERC, LERC+DEFLATE, ZSTD (optional), LERC+ZSTD (optional)
 - Predictors: horizontal differencing, floating-point byte interleaving
 - Chunky and separate planar multi-band layouts and all sample types (u8 through f64)
-- Photometric/color-model tags: palette `ColorMap`, `ExtraSamples` alpha, CMYK (`Separated` + `InkSet`), and YCbCr 4:4:4
+- Photometric/color-model tags: palette `ColorMap`, `ExtraSamples` alpha, CMYK (`Separated` + `InkSet`), and YCbCr 4:4:4 or JPEG 4:2:0
 - Streaming tile-by-tile GeoTIFF writes for large rasters
 - GeoTIFF metadata: GeoTIFF 1.1 key-directory emission, projected/geographic/geocentric/vertical compound CRS keys, pixel scale, origin, affine transforms, NoData
 - COG output with GDAL-compatible ghost-area metadata, overview generation (nearest-neighbor, average), top-level or SubIFD-backed overview IFDs, and multi-band chunky/planar rasters
@@ -140,10 +140,10 @@ with `bands(...)` and optional
 ## Codec Notes
 
 `JPEG`-in-TIFF write uses standard compression code `7` with full JPEG
-interchange streams per strip/tile. The supported interoperable layouts are
-single-band chunky output and multi-band separate-planar output, which keeps
-TIFF, GeoTIFF, and COG files compatible with GDAL/libtiff without requiring
-TIFF-side shared `JPEGTables`.
+interchange streams per strip/tile. Supported interoperable layouts include
+single-band chunky output, multi-band separate-planar output, and chunky
+three-sample YCbCr with 4:4:4 or 4:2:0 chroma sampling. The emitted TIFF,
+GeoTIFF, and COG files do not require TIFF-side shared `JPEGTables`.
 
 TIFF `LERC` writing records the registered LERC2 2.4 parameter version used by
 GDAL/libtiff. If the encoder produces a different LERC2 container version, the
@@ -181,7 +181,10 @@ mutated or truncated while it is open.
 | `rayon` | yes | Parallel strip/tile decompression (tiff-reader, geotiff-reader) |
 | `jpeg` | yes | JPEG-in-TIFF read/write support (tiff-reader, tiff-writer) |
 | `zstd` | yes | Pure-Rust ZSTD compression via `ruzstd`, including TIFF `LERC+ZSTD` read/write support (tiff-reader, tiff-writer) |
+| `webp` | yes | Pure-Rust WebP-in-TIFF decoding (tiff-reader) |
+| `f16` | no | IEEE 16-bit floating-point raster samples (all TIFF/GeoTIFF crates) |
 | `cog` | no | HTTP range-backed remote COG open with rustls TLS by default (geotiff-reader) |
+| `cog-async` | no | Async Tokio-based HTTP range-backed remote COG open (geotiff-reader) |
 | `rustls-tls` | no | Rustls-backed HTTPS transport for `geotiff-reader` remote COG opens |
 
 ## Testing

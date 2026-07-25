@@ -56,10 +56,16 @@ pub fn patch_first_ifd<W: Write + Seek>(
     ifd_offset: u64,
 ) -> Result<()> {
     if is_bigtiff {
-        sink.seek(SeekFrom::Start(header_offset + 8))?;
+        let pointer_offset = header_offset
+            .checked_add(8)
+            .ok_or_else(|| crate::error::Error::Other("BigTIFF header offset overflow".into()))?;
+        sink.seek(SeekFrom::Start(pointer_offset))?;
         sink.write_all(&byte_order.write_u64(ifd_offset))?;
     } else {
-        sink.seek(SeekFrom::Start(header_offset + 4))?;
+        let pointer_offset = header_offset
+            .checked_add(4)
+            .ok_or_else(|| crate::error::Error::Other("TIFF header offset overflow".into()))?;
+        sink.seek(SeekFrom::Start(pointer_offset))?;
         sink.write_all(&byte_order.write_u32(classic_offset_u32(ifd_offset)?))?;
     }
     Ok(())
@@ -80,24 +86,33 @@ pub struct IfdWriteResult {
 }
 
 /// Estimate the encoded size of an IFD, including deferred tag payloads.
-pub fn estimate_ifd_size(_byte_order: ByteOrder, is_bigtiff: bool, tags: &[Tag]) -> u64 {
+pub fn estimate_ifd_size(_byte_order: ByteOrder, is_bigtiff: bool, tags: &[Tag]) -> Result<u64> {
     let entry_size: u64 = if is_bigtiff { 20 } else { 12 };
     let inline_max: usize = if is_bigtiff { 8 } else { 4 };
     let next_ptr_size: u64 = if is_bigtiff { 8 } else { 4 };
     let count_size: u64 = if is_bigtiff { 8 } else { 2 };
-    let deferred_len: u64 = tags
-        .iter()
-        .map(|tag| {
-            let encoded_len = tag.value.encoded_len();
-            if encoded_len > inline_max {
-                encoded_len as u64
-            } else {
-                0
-            }
-        })
-        .sum();
+    let tag_count = u64::try_from(tags.len())
+        .map_err(|_| crate::error::Error::Other("IFD tag count exceeds u64::MAX".into()))?;
+    let entries_len = tag_count
+        .checked_mul(entry_size)
+        .ok_or_else(|| crate::error::Error::Other("IFD entry size overflow".into()))?;
+    let deferred_len = tags.iter().try_fold(0u64, |total, tag| {
+        let encoded_len = tag.value.encoded_len();
+        if encoded_len <= inline_max {
+            return Ok(total);
+        }
+        let encoded_len = u64::try_from(encoded_len)
+            .map_err(|_| crate::error::Error::Other("IFD value size exceeds u64::MAX".into()))?;
+        total
+            .checked_add(encoded_len)
+            .ok_or_else(|| crate::error::Error::Other("IFD deferred value size overflow".into()))
+    })?;
 
-    count_size + tags.len() as u64 * entry_size + next_ptr_size + deferred_len
+    count_size
+        .checked_add(entries_len)
+        .and_then(|size| size.checked_add(next_ptr_size))
+        .and_then(|size| size.checked_add(deferred_len))
+        .ok_or_else(|| crate::error::Error::Other("IFD encoded size overflow".into()))
 }
 
 /// Write an IFD (Classic or BigTIFF). Tags must be sorted by code.
@@ -110,6 +125,24 @@ pub fn write_ifd<W: Write + Seek>(
     byte_counts_tag_code: u16,
     _num_blocks: usize,
 ) -> Result<IfdWriteResult> {
+    for tags in tags.windows(2) {
+        if tags[0].code >= tags[1].code {
+            return Err(crate::error::Error::InvalidConfig(format!(
+                "IFD tags must be strictly sorted and unique; tag {} precedes tag {}",
+                tags[0].code, tags[1].code
+            )));
+        }
+    }
+    for tag in tags {
+        let value_type = tag.value.tag_type();
+        let value_count = tag.value.count();
+        if tag.tag_type != value_type || tag.count != value_count {
+            return Err(crate::error::Error::InvalidConfig(format!(
+                "tag {} metadata does not match its value: type {:?}/count {} vs {:?}/{}",
+                tag.code, tag.tag_type, tag.count, value_type, value_count
+            )));
+        }
+    }
     if !is_bigtiff && tags.len() > u16::MAX as usize {
         return Err(crate::error::Error::Other(
             "classic TIFF IFD entry count exceeds u16::MAX".into(),
@@ -139,8 +172,16 @@ pub fn write_ifd<W: Write + Seek>(
         .collect();
 
     // Calculate deferred data area start
-    let entries_total = tags.len() as u64 * entry_size;
-    let deferred_start = ifd_offset + count_size + entries_total + next_ptr_size;
+    let tag_count = u64::try_from(tags.len())
+        .map_err(|_| crate::error::Error::Other("IFD tag count exceeds u64::MAX".into()))?;
+    let entries_total = tag_count
+        .checked_mul(entry_size)
+        .ok_or_else(|| crate::error::Error::Other("IFD entry size overflow".into()))?;
+    let deferred_start = ifd_offset
+        .checked_add(count_size)
+        .and_then(|offset| offset.checked_add(entries_total))
+        .and_then(|offset| offset.checked_add(next_ptr_size))
+        .ok_or_else(|| crate::error::Error::Other("IFD layout offset overflow".into()))?;
     let mut deferred_offset = deferred_start;
 
     let mut deferred_offsets: Vec<Option<u64>> = Vec::with_capacity(tags.len());
@@ -156,7 +197,12 @@ pub fn write_ifd<W: Write + Seek>(
                 byte_counts_data_offset = Some(deferred_offset);
             }
             deferred_offsets.push(Some(deferred_offset));
-            deferred_offset += encoded.len() as u64;
+            let encoded_len = u64::try_from(encoded.len()).map_err(|_| {
+                crate::error::Error::Other("IFD value size exceeds u64::MAX".into())
+            })?;
+            deferred_offset = deferred_offset
+                .checked_add(encoded_len)
+                .ok_or_else(|| crate::error::Error::Other("IFD value offset overflow".into()))?;
         } else {
             deferred_offsets.push(None);
         }
@@ -431,26 +477,5 @@ pub fn find_tag_value_offset(
         }
     }
 
-    None
-}
-
-/// Find the position of a tag's inline value within a written IFD.
-pub fn find_inline_tag_value_offset(
-    ifd_offset: u64,
-    is_bigtiff: bool,
-    tags: &[Tag],
-    target_code: u16,
-) -> Option<u64> {
-    let count_size: u64 = if is_bigtiff { 8 } else { 2 };
-    let entry_size: u64 = if is_bigtiff { 20 } else { 12 };
-    // Value/offset field is the last 4 (classic) or 8 (BigTIFF) bytes of each entry.
-    // Entry: code(2) + type(2) + count(4 or 8) + value(4 or 8)
-    let value_field_offset: u64 = if is_bigtiff { 12 } else { 8 };
-
-    for (i, tag) in tags.iter().enumerate() {
-        if tag.code == target_code {
-            return Some(ifd_offset + count_size + (i as u64) * entry_size + value_field_offset);
-        }
-    }
     None
 }

@@ -90,8 +90,9 @@ pub struct LercParameters {
 pub struct Ifd {
     /// Tags in this IFD, sorted by tag code.
     tags: Vec<Tag>,
-    /// Index of this IFD in the chain (0-based).
-    pub index: usize,
+    /// Index of this IFD in the top-level chain (0-based), or `None` when the
+    /// IFD was reached directly through an explicit offset such as a SubIFD.
+    pub index: Option<usize>,
     /// File offset where this IFD starts.
     ///
     /// Unlike `index`, the offset uniquely identifies an IFD no matter how it
@@ -673,7 +674,7 @@ pub fn parse_ifd_chain_with_budgets(
 
         ifds.push(Ifd {
             tags,
-            index,
+            index: Some(index),
             offset,
         });
         offset = next_offset;
@@ -699,7 +700,7 @@ pub fn parse_ifd_at_with_budgets(
     let (tags, _) = read_ifd(source, header, offset, budgets, &mut usage)?;
     Ok(Ifd {
         tags,
-        index: usize::try_from(offset).unwrap_or(usize::MAX),
+        index: None,
         offset,
     })
 }
@@ -739,7 +740,10 @@ fn read_ifd(
         .checked_mul(entry_size)
         .and_then(|v| v.checked_add(next_offset_size))
         .ok_or_else(|| Error::InvalidImageLayout("IFD byte length overflows usize".into()))?;
-    let body = source.read_exact_at(offset + entry_count_size as u64, entries_len)?;
+    let body_offset = offset
+        .checked_add(entry_count_size as u64)
+        .ok_or_else(|| Error::InvalidImageLayout("IFD body offset overflows u64".into()))?;
+    let body = source.read_exact_at(body_offset, entries_len)?;
     let mut cursor = Cursor::new(&body, header.byte_order);
 
     if header.is_bigtiff() {
@@ -985,6 +989,7 @@ fn parse_tags_classic(
         tags.push(tag);
     }
     tags.sort_by_key(|tag| tag.code);
+    reject_duplicate_tags(&tags)?;
     Ok(tags)
 }
 
@@ -1018,7 +1023,18 @@ fn parse_tags_bigtiff(
         tags.push(tag);
     }
     tags.sort_by_key(|tag| tag.code);
+    reject_duplicate_tags(&tags)?;
     Ok(tags)
+}
+
+fn reject_duplicate_tags(tags: &[Tag]) -> Result<()> {
+    if let Some(duplicate) = tags.windows(2).find(|tags| tags[0].code == tags[1].code) {
+        return Err(Error::InvalidTagValue {
+            tag: duplicate[0].code,
+            reason: "duplicate tag entry in IFD".into(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1029,6 +1045,8 @@ mod tests {
         TAG_INK_SET, TAG_LERC_PARAMETERS, TAG_PHOTOMETRIC_INTERPRETATION, TAG_SAMPLES_PER_PIXEL,
         TAG_SAMPLE_FORMAT, TAG_YCBCR_SUBSAMPLING,
     };
+    use crate::header::{ByteOrder, TiffHeader};
+    use crate::source::BytesSource;
     use crate::tag::{Tag, TagType, TagValue};
 
     fn make_ifd(tags: Vec<Tag>) -> Ifd {
@@ -1036,7 +1054,7 @@ mod tests {
         tags.sort_by_key(|tag| tag.code);
         Ifd {
             tags,
-            index: 0,
+            index: Some(0),
             offset: 0,
         }
     }
@@ -1052,6 +1070,33 @@ mod tests {
         assert!(matches!(
             result,
             Err(crate::error::Error::UnsupportedBitsPerSample(16))
+        ));
+    }
+
+    #[test]
+    fn parser_rejects_duplicate_tag_codes() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        for value in [1u32, 2] {
+            bytes.extend_from_slice(&TAG_IMAGE_WIDTH.to_le_bytes());
+            bytes.extend_from_slice(&4u16.to_le_bytes());
+            bytes.extend_from_slice(&1u32.to_le_bytes());
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        let source = BytesSource::new(bytes);
+        let header = TiffHeader {
+            byte_order: ByteOrder::LittleEndian,
+            version: 42,
+            first_ifd_offset: 0,
+        };
+
+        assert!(matches!(
+            super::parse_ifd_at(&source, &header, 0),
+            Err(crate::error::Error::InvalidTagValue {
+                tag: TAG_IMAGE_WIDTH,
+                ..
+            })
         ));
     }
 

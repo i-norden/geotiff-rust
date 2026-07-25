@@ -13,10 +13,10 @@ keywords = ["geotiff", "cog", "raster", "gis", "read-only"]
 categories = ["science", "parser-implementations"]
 
 [dependencies]
-geotiff-core = { version = "0.7.0", path = "../geotiff-core" }
+geotiff-core = { version = "0.8.0", path = "../geotiff-core" }
 ndarray = { workspace = true }
 thiserror = { workspace = true }
-tiff-reader = { version = "0.7.0", path = "../tiff-reader", optional = true }
+tiff-reader = { version = "0.8.0", path = "../tiff-reader", optional = true }
 lru = { version = "0.16.3", optional = true }
 parking_lot = { version = "0.12", optional = true }
 
@@ -25,7 +25,14 @@ default = ["local", "rayon"]
 f16 = ["local", "tiff-reader/f16"]
 local = ["dep:tiff-reader"]
 rayon = ["local", "tiff-reader/rayon"]
-cog = ["dep:reqwest", "dep:lru", "dep:parking_lot", "local", "rustls-tls"]
+cog = [
+    "dep:reqwest",
+    "reqwest/blocking",
+    "dep:lru",
+    "dep:parking_lot",
+    "local",
+    "rustls-tls",
+]
 cog-async = [
     "dep:reqwest",
     "dep:tokio",
@@ -39,7 +46,6 @@ rustls-tls = ["dep:reqwest", "reqwest/rustls-tls"]
 [dependencies.reqwest]
 version = "0.12"
 default-features = false
-features = ["blocking"]
 optional = true
 
 [dependencies.tokio]

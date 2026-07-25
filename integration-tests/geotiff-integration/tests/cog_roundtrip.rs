@@ -616,6 +616,20 @@ fn cog_average_overviews_ignore_nodata_for_oneshot_and_streaming_writes() {
 }
 
 #[test]
+fn cog_streaming_rejects_duplicate_tiles() {
+    let mut buf = Cursor::new(Vec::new());
+    let mut writer = CogBuilder::new(GeoTiffBuilder::new(16, 16).tile_size(16, 16))
+        .tile_writer::<u8, _>(&mut buf)
+        .unwrap();
+    let tile = Array2::<u8>::zeros((16, 16));
+    writer.write_tile(0, 0, &tile.view()).unwrap();
+    assert!(matches!(
+        writer.write_tile(0, 0, &tile.view()),
+        Err(geotiff_writer::Error::TileAlreadyWritten { x_off: 0, y_off: 0 })
+    ));
+}
+
+#[test]
 fn cog_emits_bigtiff_when_requested() {
     let data = Array2::<u8>::from_elem((32, 32), 7);
     let mut buf = Cursor::new(Vec::new());

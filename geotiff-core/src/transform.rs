@@ -95,10 +95,12 @@ impl GeoTransform {
 
     /// Convert map coordinates (x, y) to pixel coordinates (col, row).
     ///
-    /// Returns `None` if the transform is degenerate (zero determinant).
+    /// Returns `None` if the transform is degenerate or numerically singular.
     pub fn geo_to_pixel(&self, x: f64, y: f64) -> Option<(f64, f64)> {
         let det = self.pixel_width * self.pixel_height - self.skew_x * self.skew_y;
-        if det.abs() < 1e-15 {
+        let determinant_scale =
+            (self.pixel_width * self.pixel_height).abs() + (self.skew_x * self.skew_y).abs();
+        if !det.is_finite() || det == 0.0 || det.abs() <= f64::EPSILON * determinant_scale {
             return None;
         }
         let dx = x - self.origin_x;
@@ -151,7 +153,16 @@ impl GeoTransform {
         &self,
         raster_type: RasterType,
     ) -> Option<([f64; 6], [f64; 3])> {
-        if self.skew_x.abs() > 1e-15 || self.skew_y.abs() > 1e-15 {
+        // ModelPixelScale values are positive by definition. Preserve flipped
+        // axes and every non-zero skew exactly by using ModelTransformation
+        // instead of silently approximating them as north-up.
+        if self.skew_x != 0.0
+            || self.skew_y != 0.0
+            || !self.pixel_width.is_finite()
+            || !self.pixel_height.is_finite()
+            || self.pixel_width <= 0.0
+            || self.pixel_height >= 0.0
+        {
             return None;
         }
         let scale = [self.pixel_width, -self.pixel_height, 0.0];
@@ -290,6 +301,31 @@ mod tests {
             pixel_height: -1.0,
         };
         assert!(gt.to_tiepoint_and_scale().is_none());
+    }
+
+    #[test]
+    fn tiny_but_invertible_transform_roundtrips() {
+        let gt = GeoTransform::from_origin_and_pixel_size(10.0, 20.0, 1e-12, -1e-12);
+        let (x, y) = gt.pixel_to_geo(3.0, 4.0);
+        let (col, row) = gt.geo_to_pixel(x, y).unwrap();
+        assert!((col - 3.0).abs() < 1e-3);
+        assert!((row - 4.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn flipped_or_tiny_skewed_transforms_require_a_matrix() {
+        let flipped = GeoTransform::from_origin_and_pixel_size(0.0, 0.0, -1.0, -1.0);
+        assert!(flipped.to_tiepoint_and_scale().is_none());
+
+        let skewed = GeoTransform {
+            origin_x: 0.0,
+            pixel_width: 1.0,
+            skew_x: 1e-16,
+            origin_y: 0.0,
+            skew_y: 0.0,
+            pixel_height: -1.0,
+        };
+        assert!(skewed.to_tiepoint_and_scale().is_none());
     }
 
     #[test]

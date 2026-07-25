@@ -79,8 +79,8 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
 
     /// Write a tile at pixel offset (x_off, y_off).
     ///
-    /// The data shape should match the actual tile size (may be smaller at edges).
-    /// The tile is automatically padded to the full tile dimensions with the NoData fill value.
+    /// The data shape may cover any top-left portion of the actual tile.
+    /// Unprovided and out-of-bounds cells are padded with the NoData fill value.
     pub fn write_tile(&mut self, x_off: usize, y_off: usize, data: &ArrayView2<T>) -> Result<()> {
         if self.bands != 1 {
             return Err(Error::Other(
@@ -113,10 +113,17 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
         let expected_h = (self.height as usize).saturating_sub(y_off).min(th);
         let expected_w = (self.width as usize).saturating_sub(x_off).min(tw);
         if data_h > expected_h || data_w > expected_w {
-            return Err(Error::Other(format!(
-                "tile data shape {}x{} exceeds raster bounds for tile starting at ({x_off},{y_off}); expected at most {}x{}",
-                data_h, data_w, expected_h, expected_w
-            )));
+            return Err(Error::TileShapeMismatch {
+                x_off,
+                y_off,
+                expected_height: expected_h,
+                expected_width: expected_w,
+                actual_height: data_h,
+                actual_width: data_w,
+            });
+        }
+        if self.written[tile_index] {
+            return Err(Error::TileAlreadyWritten { x_off, y_off });
         }
         let mut padded = vec![self.fill_value; tw * th];
         crate::raster_copy::copy_2d_region_into(
@@ -172,16 +179,23 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
         let expected_h = (self.height as usize).saturating_sub(y_off).min(th);
         let expected_w = (self.width as usize).saturating_sub(x_off).min(tw);
         if data_h > expected_h || data_w > expected_w {
-            return Err(Error::Other(format!(
-                "tile data shape {}x{} exceeds raster bounds for tile starting at ({x_off},{y_off}); expected at most {}x{}",
-                data_h, data_w, expected_h, expected_w
-            )));
+            return Err(Error::TileShapeMismatch {
+                x_off,
+                y_off,
+                expected_height: expected_h,
+                expected_width: expected_w,
+                actual_height: data_h,
+                actual_width: data_w,
+            });
         }
         if data_b != spp {
             return Err(Error::DataSizeMismatch {
                 expected: checked_sample_count(&[data_h, data_w, spp], "expected tile")?,
                 actual: checked_sample_count(&[data_h, data_w, data_b], "actual tile")?,
             });
+        }
+        if self.written[tile_index] {
+            return Err(Error::TileAlreadyWritten { x_off, y_off });
         }
         if matches!(self.planar_configuration, PlanarConfiguration::Planar) {
             for band in 0..spp {

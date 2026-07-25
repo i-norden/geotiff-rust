@@ -150,17 +150,11 @@ impl GeoTiffFile {
         let geokeys = parse_geokey_directory(metadata_ifd)?;
         let crs = CrsInfo::from_geokeys(&geokeys);
         let epsg = crs.epsg();
-        let tiepoints = parse_tiepoints(metadata_ifd);
-        let pixel_scale = parse_fixed_len_double_tag::<3>(
-            metadata_ifd
-                .tag(TAG_MODEL_PIXEL_SCALE)
-                .map(|tag| &tag.value),
-        );
-        let transformation = parse_fixed_len_double_tag::<16>(
-            metadata_ifd
-                .tag(TAG_MODEL_TRANSFORMATION)
-                .map(|tag| &tag.value),
-        );
+        let tiepoints = parse_tiepoints(metadata_ifd)?;
+        let pixel_scale = parse_fixed_len_double_tag::<3>(metadata_ifd, TAG_MODEL_PIXEL_SCALE)?;
+        let transformation =
+            parse_fixed_len_double_tag::<16>(metadata_ifd, TAG_MODEL_TRANSFORMATION)?;
+        validate_model_georeferencing(&tiepoints, pixel_scale.as_ref(), transformation.as_ref())?;
         let transform = transformation
             .as_ref()
             .map(GeoTransform::from_transformation_matrix)
@@ -186,7 +180,7 @@ impl GeoTiffFile {
             tiepoints,
             pixel_scale,
             transformation,
-            nodata: parse_nodata(metadata_ifd),
+            nodata: parse_nodata(metadata_ifd)?,
             band_count: base_ifd.samples_per_pixel() as u32,
             width: base_ifd.width(),
             height: base_ifd.height(),
@@ -468,7 +462,9 @@ impl GeoTiffFile {
 
 #[cfg(feature = "local")]
 fn is_overview_ifd(base: &tiff_reader::Ifd, candidate: &tiff_reader::Ifd) -> bool {
-    let smaller = candidate.width() < base.width() || candidate.height() < base.height();
+    let smaller = candidate.width() <= base.width()
+        && candidate.height() <= base.height()
+        && (candidate.width() < base.width() || candidate.height() < base.height());
     if !smaller {
         return false;
     }
@@ -493,23 +489,22 @@ fn collect_overview_ifds(
     base_ifd_index: usize,
     metadata_ifd_index: usize,
 ) -> Result<Vec<GeoImageIfd>> {
-    let mut overviews: Vec<GeoImageIfd> = tiff
-        .ifds()
-        .iter()
-        .enumerate()
-        .filter(|(index, candidate)| {
-            *index != base_ifd_index
-                && *index != metadata_ifd_index
-                && is_overview_ifd(base_ifd, candidate)
-        })
-        .map(|(index, candidate)| GeoImageIfd {
-            top_level_ifd_index: Some(index),
-            ifd: candidate.clone(),
-        })
-        .collect();
+    let mut seen_offsets = HashSet::from([base_ifd.offset()]);
+    let mut overviews: Vec<GeoImageIfd> = Vec::new();
+    for (index, candidate) in tiff.ifds().iter().enumerate() {
+        if index != base_ifd_index
+            && index != metadata_ifd_index
+            && is_overview_ifd(base_ifd, candidate)
+            && seen_offsets.insert(candidate.offset())
+        {
+            overviews.push(GeoImageIfd {
+                top_level_ifd_index: Some(index),
+                ifd: candidate.clone(),
+            });
+        }
+    }
 
     if let Some(offsets) = base_ifd.sub_ifd_offsets() {
-        let mut seen_offsets = HashSet::new();
         collect_subifd_overviews(tiff, base_ifd, &offsets, &mut seen_offsets, &mut overviews)?;
     }
 
@@ -632,55 +627,168 @@ fn has_reduced_resolution_flag(ifd: &tiff_reader::Ifd) -> bool {
 
 #[cfg(feature = "local")]
 fn parse_geokey_directory(ifd: &tiff_reader::Ifd) -> Result<GeoKeyDirectory> {
-    let Some(directory) = ifd
-        .tag(TAG_GEO_KEY_DIRECTORY)
-        .and_then(|tag| match &tag.value {
-            TagValue::Short(values) => Some(values.as_slice()),
-            _ => None,
-        })
-    else {
+    let Some(tag) = ifd.tag(TAG_GEO_KEY_DIRECTORY) else {
         return Ok(GeoKeyDirectory::new());
     };
-    let double_params = ifd
-        .tag(TAG_GEO_DOUBLE_PARAMS)
-        .and_then(|tag| tag.value.as_f64_vec())
-        .unwrap_or_default();
-    let ascii_params = ifd
-        .tag(TAG_GEO_ASCII_PARAMS)
-        .and_then(|tag| tag.value.as_str())
-        .unwrap_or("");
-    GeoKeyDirectory::parse(directory, &double_params, ascii_params)
+    let TagValue::Short(directory) = &tag.value else {
+        return Err(invalid_geotiff_tag(
+            TAG_GEO_KEY_DIRECTORY,
+            "GeoKeyDirectoryTag must use SHORT values",
+        ));
+    };
+    let double_params = match ifd.tag(TAG_GEO_DOUBLE_PARAMS) {
+        Some(tag) => match &tag.value {
+            TagValue::Double(values) => values.as_slice(),
+            _ => {
+                return Err(invalid_geotiff_tag(
+                    TAG_GEO_DOUBLE_PARAMS,
+                    "GeoDoubleParamsTag must use DOUBLE values",
+                ))
+            }
+        },
+        None => &[],
+    };
+    let ascii_params = match ifd.tag(TAG_GEO_ASCII_PARAMS) {
+        Some(tag) => match &tag.value {
+            TagValue::Ascii(value) => value.as_str(),
+            _ => {
+                return Err(invalid_geotiff_tag(
+                    TAG_GEO_ASCII_PARAMS,
+                    "GeoAsciiParamsTag must use ASCII values",
+                ))
+            }
+        },
+        None => "",
+    };
+    GeoKeyDirectory::parse(directory, double_params, ascii_params)
         .ok_or(Error::InvalidGeoKeyDirectory)
 }
 
 #[cfg(feature = "local")]
-fn parse_fixed_len_double_tag<const N: usize>(value: Option<&TagValue>) -> Option<[f64; N]> {
-    let values = value.and_then(TagValue::as_f64_vec)?;
-    if values.len() < N {
-        return None;
+fn parse_fixed_len_double_tag<const N: usize>(
+    ifd: &tiff_reader::Ifd,
+    tag_code: u16,
+) -> Result<Option<[f64; N]>> {
+    let Some(tag) = ifd.tag(tag_code) else {
+        return Ok(None);
+    };
+    let TagValue::Double(values) = &tag.value else {
+        return Err(invalid_geotiff_tag(tag_code, "tag must use DOUBLE values"));
+    };
+    if values.len() != N {
+        return Err(invalid_geotiff_tag(
+            tag_code,
+            format!("expected exactly {N} values, got {}", values.len()),
+        ));
     }
     let mut out = [0.0; N];
-    out.copy_from_slice(&values[..N]);
-    Some(out)
+    out.copy_from_slice(values);
+    Ok(Some(out))
 }
 
 #[cfg(feature = "local")]
-fn parse_tiepoints(ifd: &tiff_reader::Ifd) -> Vec<[f64; 6]> {
-    let values = ifd
-        .tag(TAG_MODEL_TIEPOINT)
-        .and_then(|tag| tag.value.as_f64_vec())
-        .unwrap_or_default();
-    values
+fn parse_tiepoints(ifd: &tiff_reader::Ifd) -> Result<Vec<[f64; 6]>> {
+    let Some(tag) = ifd.tag(TAG_MODEL_TIEPOINT) else {
+        return Ok(Vec::new());
+    };
+    let TagValue::Double(values) = &tag.value else {
+        return Err(invalid_geotiff_tag(
+            TAG_MODEL_TIEPOINT,
+            "ModelTiepointTag must use DOUBLE values",
+        ));
+    };
+    if values.is_empty() || values.len() % 6 != 0 {
+        return Err(invalid_geotiff_tag(
+            TAG_MODEL_TIEPOINT,
+            format!(
+                "expected a non-empty multiple of 6 values, got {}",
+                values.len()
+            ),
+        ));
+    }
+    Ok(values
         .chunks_exact(6)
         .map(|chunk| [chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5]])
-        .collect()
+        .collect())
 }
 
 #[cfg(feature = "local")]
-fn parse_nodata(ifd: &tiff_reader::Ifd) -> Option<String> {
-    ifd.tag(TAG_GDAL_NODATA)
-        .and_then(|tag| tag.value.as_str())
-        .map(ToOwned::to_owned)
+fn parse_nodata(ifd: &tiff_reader::Ifd) -> Result<Option<String>> {
+    let Some(tag) = ifd.tag(TAG_GDAL_NODATA) else {
+        return Ok(None);
+    };
+    match &tag.value {
+        TagValue::Ascii(value) => Ok(Some(value.clone())),
+        _ => Err(invalid_geotiff_tag(
+            TAG_GDAL_NODATA,
+            "GDAL_NODATA must use an ASCII value",
+        )),
+    }
+}
+
+#[cfg(feature = "local")]
+fn invalid_geotiff_tag(tag: u16, reason: impl Into<String>) -> Error {
+    Error::InvalidGeoTiffTag {
+        tag,
+        reason: reason.into(),
+    }
+}
+
+#[cfg(feature = "local")]
+fn validate_model_georeferencing(
+    tiepoints: &[[f64; 6]],
+    pixel_scale: Option<&[f64; 3]>,
+    transformation: Option<&[f64; 16]>,
+) -> Result<()> {
+    if tiepoints.iter().flatten().any(|value| !value.is_finite()) {
+        return Err(invalid_geotiff_tag(
+            TAG_MODEL_TIEPOINT,
+            "tiepoint values must be finite",
+        ));
+    }
+    if let Some(scale) = pixel_scale {
+        if !scale.iter().all(|value| value.is_finite())
+            || scale[0] <= 0.0
+            || scale[1] <= 0.0
+            || scale[2] < 0.0
+        {
+            return Err(invalid_geotiff_tag(
+                TAG_MODEL_PIXEL_SCALE,
+                "pixel scale must contain finite positive X/Y and non-negative Z values",
+            ));
+        }
+        if tiepoints.is_empty() {
+            return Err(invalid_geotiff_tag(
+                TAG_MODEL_PIXEL_SCALE,
+                "pixel scale requires at least one model tiepoint",
+            ));
+        }
+    }
+    if let Some(matrix) = transformation {
+        if !matrix.iter().all(|value| value.is_finite()) {
+            return Err(invalid_geotiff_tag(
+                TAG_MODEL_TRANSFORMATION,
+                "transformation matrix values must be finite",
+            ));
+        }
+        let transform = GeoTransform::from_transformation_matrix(matrix);
+        if transform
+            .geo_to_pixel(transform.origin_x, transform.origin_y)
+            .is_none()
+        {
+            return Err(invalid_geotiff_tag(
+                TAG_MODEL_TRANSFORMATION,
+                "transformation matrix must contain an invertible 2D affine transform",
+            ));
+        }
+        if pixel_scale.is_some() || !tiepoints.is_empty() {
+            return Err(invalid_geotiff_tag(
+                TAG_MODEL_TRANSFORMATION,
+                "ModelTransformationTag is mutually exclusive with ModelPixelScaleTag and ModelTiepointTag",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -690,7 +798,10 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{GeoTiffFile, MAX_SUBIFD_OVERVIEW_DEPTH, MAX_SUBIFD_OVERVIEW_NODES};
+    use super::{
+        GeoTiffFile, MAX_SUBIFD_OVERVIEW_DEPTH, MAX_SUBIFD_OVERVIEW_NODES, TAG_GDAL_NODATA,
+        TAG_MODEL_PIXEL_SCALE,
+    };
 
     #[derive(Clone)]
     struct TestIfdSpec {
@@ -925,6 +1036,43 @@ mod tests {
             let code = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
             if code == tag_code {
                 bytes[offset + 8..offset + 12].copy_from_slice(&le_u32(value));
+                return;
+            }
+            offset += 12;
+        }
+        panic!("tag {tag_code} not found in classic TIFF");
+    }
+
+    fn classic_inline_long_tag(bytes: &[u8], tag_code: u16) -> u32 {
+        let entry_count = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
+        let mut offset = 10usize;
+        for _ in 0..entry_count {
+            let code = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+            if code == tag_code {
+                return u32::from_le_bytes(bytes[offset + 8..offset + 12].try_into().unwrap());
+            }
+            offset += 12;
+        }
+        panic!("tag {tag_code} not found in classic TIFF");
+    }
+
+    fn overwrite_classic_tag_type_or_count(
+        bytes: &mut [u8],
+        tag_code: u16,
+        tag_type: Option<u16>,
+        count: Option<u32>,
+    ) {
+        let entry_count = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
+        let mut offset = 10usize;
+        for _ in 0..entry_count {
+            let code = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+            if code == tag_code {
+                if let Some(tag_type) = tag_type {
+                    bytes[offset + 2..offset + 4].copy_from_slice(&le_u16(tag_type));
+                }
+                if let Some(count) = count {
+                    bytes[offset + 4..offset + 8].copy_from_slice(&le_u32(count));
+                }
                 return;
             }
             offset += 12;
@@ -1507,6 +1655,50 @@ mod tests {
         let (values, offset) = overview.into_raw_vec_and_offset();
         assert_eq!(offset, Some(0));
         assert_eq!(values, vec![99]);
+    }
+
+    #[test]
+    fn deduplicates_overviews_referenced_by_both_ifd_chains() {
+        let mut bytes = build_geotiff_with_subifd_overview();
+        let child_ifd_offset = classic_inline_long_tag(&bytes, 330);
+        overwrite_first_ifd_next_pointer(&mut bytes, child_ifd_offset);
+
+        let file = GeoTiffFile::from_bytes(bytes).unwrap();
+        assert_eq!(file.overview_count(), 1);
+        assert_eq!(file.overview_ifd_index(0).unwrap(), 1);
+    }
+
+    #[test]
+    fn rejects_malformed_geotiff_tag_types_and_counts() {
+        let mut wrong_type = build_simple_geotiff(false);
+        overwrite_classic_tag_type_or_count(&mut wrong_type, TAG_GDAL_NODATA, Some(1), None);
+        assert!(matches!(
+            GeoTiffFile::from_bytes(wrong_type),
+            Err(crate::error::Error::InvalidGeoTiffTag {
+                tag: TAG_GDAL_NODATA,
+                ..
+            })
+        ));
+
+        let mut wrong_count = build_simple_geotiff(false);
+        overwrite_classic_tag_type_or_count(&mut wrong_count, TAG_MODEL_PIXEL_SCALE, None, Some(4));
+        assert!(matches!(
+            GeoTiffFile::from_bytes(wrong_count),
+            Err(crate::error::Error::InvalidGeoTiffTag {
+                tag: TAG_MODEL_PIXEL_SCALE,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn overview_candidates_must_not_grow_either_dimension() {
+        let mut bytes = build_geotiff_with_overview();
+        let overview_offset = first_ifd_next_pointer(&bytes) as usize;
+        overwrite_classic_inline_long_tag_at(&mut bytes, overview_offset, 257, 3);
+
+        let file = GeoTiffFile::from_bytes(bytes).unwrap();
+        assert_eq!(file.overview_count(), 0);
     }
 
     #[test]

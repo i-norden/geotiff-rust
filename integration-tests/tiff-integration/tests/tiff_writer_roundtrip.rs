@@ -516,11 +516,21 @@ fn multi_ifd_and_planar_rgb_roundtrip() {
 #[test]
 fn lerc_roundtrip_and_builder_state_behave_consistently() {
     let data: Vec<f32> = (0..16).map(|value| value as f32 * 1.1).collect();
+    let invalid = ImageBuilder::new(4, 4)
+        .sample_type::<f32>()
+        .lerc_options(LercOptions::default())
+        .predictor(Predictor::Horizontal)
+        .tiles(16, 16);
+    assert!(matches!(
+        invalid.validate(),
+        Err(tiff_writer::Error::InvalidConfig(message))
+            if message.contains("LERC compression does not support")
+    ));
+
     let values = roundtrip_image(
         ImageBuilder::new(4, 4)
             .sample_type::<f32>()
             .lerc_options(LercOptions::default())
-            .predictor(Predictor::Horizontal)
             .tiles(16, 16),
         0,
         &padded_tile(4, 4, 16, &data),
@@ -535,19 +545,6 @@ fn lerc_roundtrip_and_builder_state_behave_consistently() {
         .lerc_options(LercOptions::default())
         .compression(Compression::Deflate);
     assert!(ib.lerc_parameters_tag().is_none());
-
-    let predictor_roundtrip = roundtrip_image(
-        ImageBuilder::new(4, 4)
-            .sample_type::<f32>()
-            .lerc_options(LercOptions::default())
-            .predictor(Predictor::Horizontal)
-            .tiles(16, 16),
-        0,
-        &padded_tile(4, 4, 16, &data),
-    );
-    for (actual, expected) in predictor_roundtrip.iter().zip(data.iter()) {
-        assert!((actual - expected).abs() <= f32::EPSILON);
-    }
 
     let ib = ImageBuilder::new(4, 4)
         .sample_type::<u8>()

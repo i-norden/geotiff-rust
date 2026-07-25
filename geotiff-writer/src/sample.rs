@@ -14,6 +14,10 @@ pub trait NumericSample: WriteSample + PartialEq {
     /// exactly: out of range for the target type, or fractional for integer
     /// types.
     fn try_from_f64(value: f64) -> Option<Self>;
+    /// Parse an exact textual representation before falling back to `f64`.
+    fn parse_exact(_value: &str) -> Option<Self> {
+        None
+    }
 }
 
 pub(crate) fn parse_nodata_value<T: NumericSample>(
@@ -22,7 +26,11 @@ pub(crate) fn parse_nodata_value<T: NumericSample>(
     let Some(nd) = nodata.as_ref() else {
         return Ok(None);
     };
-    let Ok(value) = nd.trim().parse::<f64>() else {
+    let trimmed = nd.trim();
+    if let Some(value) = T::parse_exact(trimmed) {
+        return Ok(Some(value));
+    }
+    let Ok(value) = trimmed.parse::<f64>() else {
         // Non-numeric nodata text stays metadata-only; fills default to zero.
         return Ok(None);
     };
@@ -66,6 +74,10 @@ macro_rules! impl_numeric_sample_int {
                 let converted = value.round() as $ty;
                 (converted as f64 == value).then_some(converted)
             }
+
+            fn parse_exact(value: &str) -> Option<Self> {
+                value.parse::<$ty>().ok()
+            }
         }
     };
 }
@@ -102,8 +114,64 @@ impl_numeric_sample_int!(u16);
 impl_numeric_sample_int!(i16);
 impl_numeric_sample_int!(u32);
 impl_numeric_sample_int!(i32);
-impl_numeric_sample_int!(u64);
-impl_numeric_sample_int!(i64);
+impl NumericSample for u64 {
+    fn zero() -> Self {
+        0
+    }
+
+    fn to_f64(self) -> f64 {
+        self as f64
+    }
+
+    fn from_f64(value: f64) -> Self {
+        value.round() as Self
+    }
+
+    fn try_from_f64(value: f64) -> Option<Self> {
+        const EXCLUSIVE_UPPER_BOUND: f64 = 18_446_744_073_709_551_616.0;
+        if !value.is_finite()
+            || !(0.0..EXCLUSIVE_UPPER_BOUND).contains(&value)
+            || value.fract() != 0.0
+        {
+            return None;
+        }
+        Some(value as Self)
+    }
+
+    fn parse_exact(value: &str) -> Option<Self> {
+        value.parse().ok()
+    }
+}
+
+impl NumericSample for i64 {
+    fn zero() -> Self {
+        0
+    }
+
+    fn to_f64(self) -> f64 {
+        self as f64
+    }
+
+    fn from_f64(value: f64) -> Self {
+        value.round() as Self
+    }
+
+    fn try_from_f64(value: f64) -> Option<Self> {
+        const INCLUSIVE_LOWER_BOUND: f64 = -9_223_372_036_854_775_808.0;
+        const EXCLUSIVE_UPPER_BOUND: f64 = 9_223_372_036_854_775_808.0;
+        if !value.is_finite()
+            || !(INCLUSIVE_LOWER_BOUND..EXCLUSIVE_UPPER_BOUND).contains(&value)
+            || value.fract() != 0.0
+        {
+            return None;
+        }
+        Some(value as Self)
+    }
+
+    fn parse_exact(value: &str) -> Option<Self> {
+        value.parse().ok()
+    }
+}
 #[cfg(feature = "f16")]
 impl NumericSample for half::f16 {
     fn zero() -> Self {
@@ -171,5 +239,16 @@ mod tests {
             None
         );
         assert_eq!(nodata_fill_or_zero::<u8>(&None).unwrap(), 0);
+
+        assert_eq!(
+            parse_nodata_value::<u64>(&Some(u64::MAX.to_string())).unwrap(),
+            Some(u64::MAX)
+        );
+        assert_eq!(
+            parse_nodata_value::<i64>(&Some(i64::MIN.to_string())).unwrap(),
+            Some(i64::MIN)
+        );
+        assert!(parse_nodata_value::<u64>(&Some("18446744073709551616".to_string())).is_err());
+        assert!(parse_nodata_value::<i64>(&Some("9223372036854775808".to_string())).is_err());
     }
 }

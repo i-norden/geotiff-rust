@@ -485,6 +485,13 @@ fn streaming_tile_writer_rejects_misaligned_offsets_and_band_mismatches() {
     assert!(
         matches!(err, GeoTiffWriteError::Other(message) if message.contains("align to tile boundaries"))
     );
+    single_band_writer
+        .write_tile(0, 0, &single_band_tile.view())
+        .unwrap();
+    assert!(matches!(
+        single_band_writer.write_tile(0, 0, &single_band_tile.view()),
+        Err(GeoTiffWriteError::TileAlreadyWritten { x_off: 0, y_off: 0 })
+    ));
 
     let mut planar_buf = Cursor::new(Vec::new());
     let mut planar_writer = GeoTiffBuilder::new(32, 32)

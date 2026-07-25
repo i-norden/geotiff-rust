@@ -233,6 +233,7 @@ impl GeoTiffBuilder {
     pub fn pixel_scale(mut self, scale_x: f64, scale_y: f64) -> Self {
         self.pixel_scale = Some([scale_x, scale_y, 0.0]);
         self.affine_transform = None;
+        self.transformation_matrix = None;
         self
     }
 
@@ -241,6 +242,7 @@ impl GeoTiffBuilder {
         self.tiepoint = Some([0.0, 0.0, 0.0, x, y, 0.0]);
         self.tiepoint_is_origin = true;
         self.affine_transform = None;
+        self.transformation_matrix = None;
         self
     }
 
@@ -249,6 +251,7 @@ impl GeoTiffBuilder {
         self.tiepoint = Some(tiepoint);
         self.tiepoint_is_origin = false;
         self.affine_transform = None;
+        self.transformation_matrix = None;
         self
     }
 
@@ -321,10 +324,7 @@ impl GeoTiffBuilder {
 
     /// Set predictor (requires compression != None).
     pub fn predictor(mut self, predictor: Predictor) -> Self {
-        // LERC and JPEG do not use TIFF predictors; ignore the request.
-        if !matches!(self.compression, Compression::Lerc | Compression::Jpeg) {
-            self.predictor = predictor;
-        }
+        self.predictor = predictor;
         self
     }
 
@@ -412,6 +412,7 @@ impl GeoTiffBuilder {
 
     /// Build the GeoTIFF extra tags from the current metadata.
     pub(crate) fn build_extra_tags(&self) -> Result<Vec<Tag>> {
+        self.validate_georeferencing()?;
         let mut extra = Vec::new();
         let writes_georeferencing = self.transformation_matrix.is_some()
             || self.affine_transform.is_some()
@@ -484,6 +485,71 @@ impl GeoTiffBuilder {
         }
 
         Ok(extra)
+    }
+
+    fn validate_georeferencing(&self) -> Result<()> {
+        if let Some(matrix) = self.transformation_matrix {
+            if !matrix.iter().all(|value| value.is_finite()) {
+                return Err(Error::InvalidConfig(
+                    "model transformation matrix values must be finite".into(),
+                ));
+            }
+            let transform = GeoTransform::from_transformation_matrix(&matrix);
+            if transform
+                .geo_to_pixel(transform.origin_x, transform.origin_y)
+                .is_none()
+            {
+                return Err(Error::InvalidConfig(
+                    "model transformation matrix must contain an invertible 2D affine transform"
+                        .into(),
+                ));
+            }
+        }
+        if let Some(transform) = self.affine_transform {
+            let values = [
+                transform.origin_x,
+                transform.pixel_width,
+                transform.skew_x,
+                transform.origin_y,
+                transform.skew_y,
+                transform.pixel_height,
+            ];
+            if !values.iter().all(|value| value.is_finite())
+                || transform
+                    .geo_to_pixel(transform.origin_x, transform.origin_y)
+                    .is_none()
+            {
+                return Err(Error::InvalidConfig(
+                    "affine transform must be finite and invertible".into(),
+                ));
+            }
+        }
+        if let Some(pixel_scale) = self.pixel_scale {
+            if !pixel_scale.iter().all(|value| value.is_finite())
+                || pixel_scale[0] <= 0.0
+                || pixel_scale[1] <= 0.0
+                || pixel_scale[2] < 0.0
+            {
+                return Err(Error::InvalidConfig(
+                    "model pixel scale must contain finite positive X/Y and non-negative Z values"
+                        .into(),
+                ));
+            }
+            if self.tiepoint.is_none() {
+                return Err(Error::InvalidConfig(
+                    "model pixel scale requires a model tiepoint or origin".into(),
+                ));
+            }
+        }
+        if self
+            .tiepoint
+            .is_some_and(|tiepoint| !tiepoint.iter().all(|value| value.is_finite()))
+        {
+            return Err(Error::InvalidConfig(
+                "model tiepoint values must be finite".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn with_overview_georeferencing(&self, level: u32) -> Self {
@@ -975,5 +1041,42 @@ mod tests {
         assert!(
             matches!(err, Error::Other(message) if message.contains("sample count overflows usize"))
         );
+    }
+
+    #[test]
+    fn later_scale_and_origin_settings_replace_a_transformation_matrix() {
+        let builder = GeoTiffBuilder::new(1, 1)
+            .transformation_matrix(
+                GeoTransform::from_origin_and_pixel_size(10.0, 20.0, 2.0, -2.0)
+                    .to_transformation_matrix(),
+            )
+            .pixel_scale(3.0, 4.0)
+            .origin(30.0, 40.0);
+        let tags = builder.build_extra_tags().unwrap();
+
+        assert!(tags
+            .iter()
+            .all(|tag| tag.code != tags::TAG_MODEL_TRANSFORMATION));
+        assert!(tags
+            .iter()
+            .any(|tag| tag.code == tags::TAG_MODEL_PIXEL_SCALE));
+        assert!(tags.iter().any(|tag| tag.code == tags::TAG_MODEL_TIEPOINT));
+    }
+
+    #[test]
+    fn invalid_georeferencing_is_rejected_before_writing() {
+        assert!(GeoTiffBuilder::new(1, 1)
+            .pixel_scale(0.0, 1.0)
+            .origin(0.0, 0.0)
+            .build_extra_tags()
+            .is_err());
+        assert!(GeoTiffBuilder::new(1, 1)
+            .pixel_scale(1.0, 1.0)
+            .build_extra_tags()
+            .is_err());
+        assert!(GeoTiffBuilder::new(1, 1)
+            .transformation_matrix([0.0; 16])
+            .build_extra_tags()
+            .is_err());
     }
 }

@@ -14,6 +14,9 @@ pub enum Error {
     #[error("unsupported TIFF version: {0}")]
     UnsupportedVersion(u16),
 
+    #[error("invalid BigTIFF header: {0}")]
+    InvalidBigTiffHeader(String),
+
     #[error("IFD index {0} not found")]
     IfdNotFound(usize),
 
