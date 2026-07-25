@@ -7,6 +7,7 @@
 //! GeoKeys reference values either inline (location=0), from the
 //! GeoDoubleParams tag (34736), or from the GeoAsciiParams tag (34737).
 
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 
@@ -42,8 +43,16 @@ pub const GEO_KEY_MINOR_REVISION_1_1: u16 = 1;
 /// GeoTIFF SHORT-based key directory format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GeoKeySerializeError {
+    /// KeyDirectoryVersion must be 1.
+    InvalidDirectoryVersion { version: u16 },
+    /// KeyRevision must be 1.
+    InvalidMajorRevision { major_revision: u16 },
     /// The GeoKey directory minor revision must be 0 or 1.
     InvalidMinorRevision { minor_revision: u16 },
+    /// A key ID may occur only once in a directory.
+    DuplicateKey { key_id: u16 },
+    /// GeoAsciiParams values must be delimiter-free ASCII.
+    InvalidAsciiValue { key_id: u16 },
     /// The GeoKey directory header stores the key count as a SHORT.
     TooManyKeys { count: usize },
     /// A key references more parameter values than fit in a SHORT count.
@@ -59,9 +68,24 @@ pub enum GeoKeySerializeError {
 impl fmt::Display for GeoKeySerializeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidDirectoryVersion { version } => write!(
+                f,
+                "GeoKey directory version {version} is invalid; expected 1"
+            ),
+            Self::InvalidMajorRevision { major_revision } => write!(
+                f,
+                "GeoKey directory major revision {major_revision} is invalid; expected 1"
+            ),
             Self::InvalidMinorRevision { minor_revision } => write!(
                 f,
                 "GeoKey directory minor revision {minor_revision} is invalid; expected 0 or 1"
+            ),
+            Self::DuplicateKey { key_id } => {
+                write!(f, "GeoKey directory contains duplicate key ID {key_id}")
+            }
+            Self::InvalidAsciiValue { key_id } => write!(
+                f,
+                "GeoKey {key_id} ASCII value must contain only ASCII characters and no '|' delimiter"
             ),
             Self::TooManyKeys { count } => {
                 write!(
@@ -140,45 +164,69 @@ impl GeoKeyDirectory {
         let minor_revision = directory[2];
         let num_keys = directory[3] as usize;
 
-        if directory.len() < 4 + num_keys * 4 {
+        if version != GEO_KEY_DIRECTORY_VERSION
+            || major_revision != GEO_KEY_REVISION
+            || !matches!(
+                minor_revision,
+                GEO_KEY_MINOR_REVISION_1_0 | GEO_KEY_MINOR_REVISION_1_1
+            )
+            || directory.len() != 4 + num_keys * 4
+            || !ascii_params.is_ascii()
+        {
             return None;
         }
 
         let mut keys = Vec::with_capacity(num_keys);
+        let mut seen_ids = HashSet::with_capacity(num_keys);
         for i in 0..num_keys {
             let base = 4 + i * 4;
             let key_id = directory[base];
             let location = directory[base + 1];
             let count = directory[base + 2] as usize;
             let value_offset = directory[base + 3];
+            if !seen_ids.insert(key_id) {
+                return None;
+            }
 
             let value = match location {
                 0 => {
                     // Value is the offset itself (short).
+                    if count != 1 {
+                        return None;
+                    }
                     GeoKeyValue::Short(value_offset)
                 }
                 34736 => {
                     // Value is in GeoDoubleParams.
+                    if count == 0 {
+                        return None;
+                    }
                     let start = value_offset as usize;
-                    let end = start + count;
+                    let end = start.checked_add(count)?;
                     if end <= double_params.len() {
                         GeoKeyValue::Double(double_params[start..end].to_vec())
                     } else {
-                        continue;
+                        return None;
                     }
                 }
                 34737 => {
                     // Value is in GeoAsciiParams.
+                    if count == 0 {
+                        return None;
+                    }
                     let start = value_offset as usize;
-                    let end = start + count;
+                    let end = start.checked_add(count)?;
                     if let Some(raw) = ascii_params.get(start..end) {
+                        if !raw.ends_with('|') {
+                            return None;
+                        }
                         let s = raw.trim_end_matches('|').trim_end_matches('\0').to_string();
                         GeoKeyValue::Ascii(s)
                     } else {
-                        continue;
+                        return None;
                     }
                 }
-                _ => continue,
+                _ => return None,
             };
 
             keys.push(GeoKey { id: key_id, value });
@@ -242,8 +290,24 @@ impl GeoKeyDirectory {
     /// Double values reference the double_params array (location=34736),
     /// Ascii values reference the ascii_params string (location=34737).
     pub fn serialize(&self) -> Result<(Vec<u16>, Vec<f64>, String), GeoKeySerializeError> {
+        if self.version != GEO_KEY_DIRECTORY_VERSION {
+            return Err(GeoKeySerializeError::InvalidDirectoryVersion {
+                version: self.version,
+            });
+        }
+        if self.major_revision != GEO_KEY_REVISION {
+            return Err(GeoKeySerializeError::InvalidMajorRevision {
+                major_revision: self.major_revision,
+            });
+        }
+
         let mut sorted_keys = self.keys.clone();
         sorted_keys.sort_by_key(|k| k.id);
+        if let Some(duplicate) = sorted_keys.windows(2).find(|keys| keys[0].id == keys[1].id) {
+            return Err(GeoKeySerializeError::DuplicateKey {
+                key_id: duplicate[0].id,
+            });
+        }
         let key_count =
             u16::try_from(sorted_keys.len()).map_err(|_| GeoKeySerializeError::TooManyKeys {
                 count: sorted_keys.len(),
@@ -279,6 +343,9 @@ impl GeoKeyDirectory {
                     double_params.extend_from_slice(v);
                 }
                 GeoKeyValue::Ascii(s) => {
+                    if !s.is_ascii() || s.contains('|') {
+                        return Err(GeoKeySerializeError::InvalidAsciiValue { key_id: key.id });
+                    }
                     let ascii_with_pipe = format!("{}|", s);
                     let count =
                         checked_u16_len(key.id, GEO_ASCII_PARAMS_TAG, ascii_with_pipe.len())?;
@@ -390,6 +457,57 @@ mod tests {
     }
 
     #[test]
+    fn parse_rejects_invalid_headers_duplicate_keys_and_inline_counts() {
+        assert!(GeoKeyDirectory::parse(&[2, 1, 1, 0], &[], "").is_none());
+        assert!(GeoKeyDirectory::parse(&[1, 2, 1, 0], &[], "").is_none());
+        assert!(GeoKeyDirectory::parse(&[1, 1, 2, 0], &[], "").is_none());
+        assert!(GeoKeyDirectory::parse(&[1, 1, 1, 1, GT_MODEL_TYPE, 0, 2, 1], &[], "").is_none());
+        assert!(GeoKeyDirectory::parse(
+            &[1, 1, 1, 2, GT_MODEL_TYPE, 0, 1, 1, GT_MODEL_TYPE, 0, 1, 2],
+            &[],
+            ""
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn serialize_rejects_invalid_headers_duplicates_and_non_ascii_values() {
+        let mut dir = GeoKeyDirectory::new();
+        dir.version = 2;
+        assert!(matches!(
+            dir.serialize(),
+            Err(GeoKeySerializeError::InvalidDirectoryVersion { version: 2 })
+        ));
+
+        let mut dir = GeoKeyDirectory::new();
+        dir.keys = vec![
+            GeoKey {
+                id: GT_MODEL_TYPE,
+                value: GeoKeyValue::Short(1),
+            },
+            GeoKey {
+                id: GT_MODEL_TYPE,
+                value: GeoKeyValue::Short(2),
+            },
+        ];
+        assert!(matches!(
+            dir.serialize(),
+            Err(GeoKeySerializeError::DuplicateKey {
+                key_id: GT_MODEL_TYPE
+            })
+        ));
+
+        let mut dir = GeoKeyDirectory::new();
+        dir.set(GEOG_CITATION, GeoKeyValue::Ascii("WGS 84 | invalid".into()));
+        assert!(matches!(
+            dir.serialize(),
+            Err(GeoKeySerializeError::InvalidAsciiValue {
+                key_id: GEOG_CITATION
+            })
+        ));
+    }
+
+    #[test]
     fn set_replaces_existing() {
         let mut dir = GeoKeyDirectory::new();
         dir.set(GT_MODEL_TYPE, GeoKeyValue::Short(1));
@@ -407,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_skips_invalid_ascii_subslice_without_panicking() {
+    fn parse_rejects_invalid_parameter_references_without_panicking() {
         let directory = [
             1u16,
             1,
@@ -420,8 +538,16 @@ mod tests {
         ];
         let ascii = String::from_utf8_lossy(&[0xff, b'|']).into_owned();
 
-        let parsed = GeoKeyDirectory::parse(&directory, &[], &ascii).unwrap();
-        assert!(parsed.get_ascii(GEOG_CITATION).is_none());
+        assert!(GeoKeyDirectory::parse(&directory, &[], &ascii).is_none());
+        assert!(
+            GeoKeyDirectory::parse(&[1, 1, 1, 1, GEOG_CITATION, 34737, 2, 0], &[], "x|").is_some()
+        );
+        assert!(
+            GeoKeyDirectory::parse(&[1, 1, 1, 1, GEOG_CITATION, 34737, 1, 0], &[], "x").is_none()
+        );
+        assert!(
+            GeoKeyDirectory::parse(&[1, 1, 1, 1, GEOG_CITATION, 65000, 1, 0], &[], "").is_none()
+        );
     }
 
     #[test]

@@ -21,6 +21,9 @@ pub enum Error {
     #[error("invalid GeoKey directory")]
     InvalidGeoKeyDirectory,
 
+    #[error("invalid GeoTIFF tag {tag}: {reason}")]
+    InvalidGeoTiffTag { tag: u16, reason: String },
+
     #[error("overview index {0} not found")]
     OverviewNotFound(usize),
 
