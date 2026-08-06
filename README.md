@@ -135,7 +135,8 @@ with `bands(...)` and optional
 - Streaming tile-by-tile GeoTIFF writes for large rasters
 - GeoTIFF metadata: GeoTIFF 1.1 key-directory emission, projected/geographic/geocentric/vertical compound CRS keys, pixel scale, origin, affine transforms, NoData
 - COG output with GDAL-compatible ghost-area metadata, overview generation (nearest-neighbor, average), top-level or SubIFD-backed overview IFDs, and multi-band chunky/planar rasters
-- Disk-backed tile-wise COG assembly via `CogTileWriter` (base tiles are staged in a temporary raw tile store before final emission)
+- Tile-wise COG assembly via `CogTileWriter` (base tiles are staged in a temporary raw tile store before final emission)
+- `wasm32-unknown-unknown` support: COG assembly stages blocks in memory instead of a temporary file
 
 ## Codec Notes
 

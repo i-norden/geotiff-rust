@@ -18,7 +18,6 @@ use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use ndarray::{ArrayView2, ArrayView3, Axis};
-use tempfile::tempfile;
 use tiff_core::{ByteOrder, Compression, Predictor, Tag, TagType, TagValue, TAG_SUB_IFDS};
 use tiff_writer::{encoder, ImageBuilder, TiffVariant};
 use tiff_writer::{JpegOptions, LercOptions};
@@ -159,19 +158,42 @@ struct CogLayout {
     images: Vec<PlannedCogImage>,
 }
 
-struct BlockSpool {
-    file: File,
+/// Scratch storage for staged COG blocks and raw tiles.
+///
+/// Native targets spool to a temporary file so assembling a COG does not hold
+/// the whole raster in memory. wasm32 has no filesystem, so it spools into
+/// memory instead.
+#[cfg(not(target_arch = "wasm32"))]
+type SpoolStorage = File;
+#[cfg(target_arch = "wasm32")]
+type SpoolStorage = io::Cursor<Vec<u8>>;
+
+fn new_spool_storage() -> Result<SpoolStorage> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Ok(tempfile::tempfile()?)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        Ok(io::Cursor::new(Vec::new()))
+    }
+}
+
+struct BlockSpool<S = SpoolStorage> {
+    storage: S,
     len: u64,
 }
 
-impl BlockSpool {
+impl BlockSpool<SpoolStorage> {
     fn new() -> Result<Self> {
         Ok(Self {
-            file: tempfile()?,
+            storage: new_spool_storage()?,
             len: 0,
         })
     }
+}
 
+impl<S: Read + Write + Seek> BlockSpool<S> {
     fn append_segmented(
         &mut self,
         prefix: &[u8],
@@ -188,10 +210,10 @@ impl BlockSpool {
             "COG block size",
         )?;
 
-        self.file.seek(SeekFrom::End(0))?;
-        self.file.write_all(prefix)?;
-        self.file.write_all(payload)?;
-        self.file.write_all(suffix)?;
+        self.storage.seek(SeekFrom::End(0))?;
+        self.storage.write_all(prefix)?;
+        self.storage.write_all(payload)?;
+        self.storage.write_all(suffix)?;
         self.len = checked_add_u64(self.len, physical_len, "COG spool length")?;
 
         Ok(CogBlockRecord {
@@ -203,35 +225,37 @@ impl BlockSpool {
     }
 
     fn copy_into<W: Write + Seek>(&mut self, sink: &mut W) -> Result<()> {
-        self.file.seek(SeekFrom::Start(0))?;
+        self.storage.seek(SeekFrom::Start(0))?;
         sink.seek(SeekFrom::End(0))?;
-        io::copy(&mut self.file, sink)?;
+        io::copy(&mut self.storage, sink)?;
         Ok(())
     }
 }
 
-struct RawTileStore<T: NumericSample> {
-    file: File,
+struct RawTileStore<T: NumericSample, S = SpoolStorage> {
+    storage: S,
     block_samples: usize,
     block_bytes: usize,
     byte_order: ByteOrder,
     _phantom: std::marker::PhantomData<T>,
 }
 
-impl<T: NumericSample> RawTileStore<T> {
+impl<T: NumericSample> RawTileStore<T, SpoolStorage> {
     fn new(block_samples: usize) -> Result<Self> {
         let block_bytes = block_samples
             .checked_mul(T::BYTES_PER_SAMPLE)
             .ok_or_else(|| Error::Other("raw tile block size overflows usize".into()))?;
         Ok(Self {
-            file: tempfile()?,
+            storage: new_spool_storage()?,
             block_samples,
             block_bytes,
             byte_order: native_byte_order(),
             _phantom: std::marker::PhantomData,
         })
     }
+}
 
+impl<T: NumericSample, S: Read + Write + Seek> RawTileStore<T, S> {
     fn offset_for_block(&self, block_index: usize) -> Result<u64> {
         let block_bytes = checked_len_u64(self.block_bytes, "raw tile block")?;
         let index = checked_len_u64(block_index, "raw tile block index")?;
@@ -250,16 +274,16 @@ impl<T: NumericSample> RawTileStore<T> {
         }
         let offset = self.offset_for_block(block_index)?;
         let encoded = T::encode_slice(samples, self.byte_order);
-        self.file.seek(SeekFrom::Start(offset))?;
-        self.file.write_all(&encoded)?;
+        self.storage.seek(SeekFrom::Start(offset))?;
+        self.storage.write_all(&encoded)?;
         Ok(())
     }
 
     fn read_block(&mut self, block_index: usize) -> Result<Vec<T>> {
         let offset = self.offset_for_block(block_index)?;
         let mut encoded = vec![0u8; self.block_bytes];
-        self.file.seek(SeekFrom::Start(offset))?;
-        self.file.read_exact(&mut encoded)?;
+        self.storage.seek(SeekFrom::Start(offset))?;
+        self.storage.read_exact(&mut encoded)?;
         Ok(T::decode_many(&encoded))
     }
 }
@@ -1073,7 +1097,7 @@ impl CogBuilder {
         Ok(())
     }
 
-    /// Create a disk-backed COG tile writer.
+    /// Create a tile-wise COG writer.
     pub fn tile_writer<T: NumericSample, W: Write + Seek>(
         &self,
         sink: W,
@@ -1081,7 +1105,7 @@ impl CogBuilder {
         CogTileWriter::new(self.clone(), sink)
     }
 
-    /// Create a disk-backed COG tile writer to a file.
+    /// Create a tile-wise COG writer to a file.
     pub fn tile_writer_file<T: NumericSample, P: AsRef<Path>>(
         &self,
         path: P,
@@ -1092,11 +1116,12 @@ impl CogBuilder {
     }
 }
 
-/// Disk-backed COG tile writer.
+/// Tile-wise COG writer.
 ///
-/// Base tiles are written incrementally into a temporary raw tile store, and
-/// the final COG layout is emitted on `finish()` without buffering the full
-/// raster in memory.
+/// Base tiles are written incrementally into a raw tile store, and the final
+/// COG layout is emitted on `finish()`. The store is a temporary file on
+/// targets with a filesystem, so the full raster is never buffered in memory;
+/// wasm32 stages it in memory instead.
 pub struct CogTileWriter<T: NumericSample, W: Write + Seek> {
     sink: W,
     cog: CogBuilder,
@@ -1940,6 +1965,44 @@ mod tests {
                 assert_eq!((ghost_end + layout.prefix_padding as u64) % 2, 0);
             }
         }
+    }
+
+    #[test]
+    fn memory_spool_records_and_replays_blocks() {
+        let mut spool = BlockSpool {
+            storage: io::Cursor::new(Vec::new()),
+            len: 0,
+        };
+        let first = spool.append_segmented(&[1, 2], &[3, 4, 5], &[6]).unwrap();
+        let second = spool.append_segmented(&[7], &[8, 9], &[]).unwrap();
+
+        assert_eq!(first.spool_offset, 0);
+        assert_eq!(first.logical_offset_delta, 2);
+        assert_eq!(first.logical_byte_count, 3);
+        assert_eq!(second.spool_offset, 6);
+        assert_eq!(spool.len, 9);
+
+        let mut sink = io::Cursor::new(Vec::new());
+        spool.copy_into(&mut sink).unwrap();
+        assert_eq!(sink.into_inner(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn memory_raw_tile_store_reads_back_out_of_order_blocks() {
+        let mut store = RawTileStore::<u16, _> {
+            storage: io::Cursor::new(Vec::new()),
+            block_samples: 2,
+            block_bytes: 4,
+            byte_order: native_byte_order(),
+            _phantom: std::marker::PhantomData,
+        };
+        store.write_block(2, &[7, 8]).unwrap();
+        store.write_block(0, &[1, 2]).unwrap();
+
+        assert_eq!(store.read_block(0).unwrap(), vec![1, 2]);
+        assert_eq!(store.read_block(2).unwrap(), vec![7, 8]);
+        // Blocks skipped by an out-of-order write read back as zeros.
+        assert_eq!(store.read_block(1).unwrap(), vec![0, 0]);
     }
 
     #[test]

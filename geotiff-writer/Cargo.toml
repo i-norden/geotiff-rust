@@ -18,8 +18,11 @@ tiff-writer = { version = "0.8.0", path = "../tiff-writer" }
 tiff-core = { version = "0.8.0", path = "../tiff-core" }
 ndarray = { workspace = true }
 thiserror = { workspace = true }
-tempfile = "3"
 half = { workspace = true, optional = true }
+
+# COG assembly spools blocks to a temporary file on targets that have one.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tempfile = "3"
 
 [features]
 f16 = ["dep:half", "tiff-writer/f16"]
