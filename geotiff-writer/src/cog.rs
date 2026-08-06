@@ -2,7 +2,8 @@
 //!
 //! COG files have a specific byte layout:
 //! 1. TIFF header
-//! 2. GDAL structural metadata block (the COG "ghost area")
+//! 2. GDAL structural metadata block (the COG "ghost area"), padded to a
+//!    2-byte boundary
 //! 3. Base image IFD (full resolution)
 //! 4. Overview IFDs (largest → smallest), either in the top-level IFD chain
 //!    or referenced by the base image's SubIFDs tag
@@ -152,6 +153,9 @@ struct PlannedCogImage {
 struct CogLayout {
     base_offset: u64,
     is_bigtiff: bool,
+    /// Zero bytes written after the ghost area to keep the first IFD on a
+    /// 2-byte boundary. Always 0 or 1.
+    prefix_padding: usize,
     images: Vec<PlannedCogImage>,
 }
 
@@ -586,7 +590,7 @@ fn plan_cog_layout_for_variant(
     is_bigtiff: bool,
 ) -> Result<CogLayout> {
     let mut image_plans = Vec::with_capacity(images.len());
-    let mut current = checked_add_u64(
+    let prefix_end = checked_add_u64(
         checked_add_u64(
             base_offset,
             encoder::header_len(is_bigtiff),
@@ -595,6 +599,10 @@ fn plan_cog_layout_for_variant(
         prefix_len,
         "COG prefix size",
     )?;
+    // TIFF IFDs start on a word boundary, so GDAL pads the ghost area to an
+    // even offset and readers expect the first IFD there.
+    let prefix_padding = usize::from(prefix_end % 2 != 0);
+    let mut current = checked_add_u64(prefix_end, prefix_padding as u64, "COG prefix padding")?;
 
     for image in images {
         let expected_blocks = image.builder.checked_block_count()?;
@@ -657,6 +665,7 @@ fn plan_cog_layout_for_variant(
     Ok(CogLayout {
         base_offset,
         is_bigtiff,
+        prefix_padding,
         images: image_plans,
     })
 }
@@ -693,6 +702,7 @@ fn emit_cog<W: Write + Seek>(
     sink.seek(SeekFrom::Start(layout.base_offset))?;
     encoder::write_header(sink, ByteOrder::LittleEndian, layout.is_bigtiff)?;
     sink.write_all(prefix)?;
+    sink.write_all(&[0u8; 1][..layout.prefix_padding])?;
 
     let mut ifd_results = Vec::with_capacity(images.len());
     for (image, planned) in images.iter().zip(&layout.images) {
@@ -1896,6 +1906,41 @@ fn spool_cog_block<T: NumericSample>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn single_block_image() -> CogImage {
+        CogImage {
+            builder: ImageBuilder::new(1, 1).sample_type::<u8>().tiles(16, 16),
+            blocks: vec![CogBlockRecord {
+                spool_offset: 0,
+                logical_offset_delta: 4,
+                logical_byte_count: 1,
+                sparse: false,
+            }],
+            sub_ifd_count: 0,
+        }
+    }
+
+    #[test]
+    fn cog_layout_pads_an_odd_ghost_area_to_a_word_boundary() {
+        let images = vec![single_block_image()];
+        for planar_configuration in [
+            tiff_core::PlanarConfiguration::Chunky,
+            tiff_core::PlanarConfiguration::Planar,
+        ] {
+            let prefix_len = checked_len_u64(
+                gdal_structural_metadata_bytes(planar_configuration).len(),
+                "COG prefix",
+            )
+            .unwrap();
+            for is_bigtiff in [false, true] {
+                let layout =
+                    plan_cog_layout_for_variant(0, prefix_len, &images, is_bigtiff).unwrap();
+                let ghost_end = encoder::header_len(is_bigtiff) + prefix_len;
+                assert_eq!(layout.prefix_padding as u64, ghost_end % 2);
+                assert_eq!((ghost_end + layout.prefix_padding as u64) % 2, 0);
+            }
+        }
+    }
 
     #[test]
     fn auto_promotes_cog_layout_to_bigtiff_when_classic_offsets_overflow() {
