@@ -56,6 +56,22 @@ pub fn python_gdal_available() -> bool {
     })
 }
 
+/// GDAL's COG validator ships in `osgeo_utils`, which is packaged separately
+/// from the `osgeo` bindings on some distributions.
+pub fn cog_validator_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        Command::new("python3")
+            .args([
+                "-c",
+                "from osgeo_utils.samples.validate_cloud_optimized_geotiff import validate",
+            ])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    })
+}
+
 pub fn tiffdump_available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
     *AVAILABLE.get_or_init(|| Command::new("tiffdump").output().is_ok())

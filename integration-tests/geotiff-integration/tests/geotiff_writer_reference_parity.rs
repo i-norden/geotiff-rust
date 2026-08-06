@@ -232,8 +232,8 @@ fn assert_gdal_cog_validator_accepts(path: &Path) {
 
 #[test]
 fn generated_cogs_pass_the_gdal_cog_validator() {
-    if !reference::python_gdal_available() {
-        eprintln!("skipping GDAL COG validator test because Python GDAL bindings are unavailable");
+    if !reference::cog_validator_available() {
+        eprintln!("skipping GDAL COG validator test because osgeo_utils is unavailable");
         return;
     }
 
