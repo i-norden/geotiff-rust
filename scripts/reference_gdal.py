@@ -171,6 +171,18 @@ def command_diagnostics(args):
     print(json.dumps(payload))
 
 
+def command_validate_cog(args):
+    from osgeo_utils.samples.validate_cloud_optimized_geotiff import validate
+
+    warnings, errors, details = validate(args.path, full_check=True)
+    payload = {
+        "errors": errors,
+        "warnings": warnings,
+        "ifd_offsets": details.get("ifd_offsets", {}),
+    }
+    print(json.dumps(payload))
+
+
 def command_capabilities(_args):
     gtiff = gdal.GetDriverByName("GTiff")
     creation_options = gtiff.GetMetadataItem("DMD_CREATIONOPTIONLIST") if gtiff else ""
@@ -231,6 +243,10 @@ def build_parser():
     diagnostics.add_argument("path")
     diagnostics.add_argument("--overview", type=int, default=None)
     diagnostics.set_defaults(func=command_diagnostics)
+
+    validate_cog = subparsers.add_parser("validate-cog")
+    validate_cog.add_argument("path")
+    validate_cog.set_defaults(func=command_validate_cog)
 
     capabilities = subparsers.add_parser("capabilities")
     capabilities.set_defaults(func=command_capabilities)

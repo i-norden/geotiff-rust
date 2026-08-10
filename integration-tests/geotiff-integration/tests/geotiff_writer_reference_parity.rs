@@ -221,6 +221,31 @@ fn matches_gdal_for_generated_jpeg_geotiff() {
     assert_gdal_u8_pixels_close(fixture.path());
 }
 
+fn assert_gdal_cog_validator_accepts(path: &Path) {
+    let report = reference::run_reference_json(
+        env!("CARGO_MANIFEST_DIR"),
+        &["validate-cog", path.to_str().unwrap()],
+    );
+    let errors = report["errors"].as_array().unwrap();
+    assert!(errors.is_empty(), "GDAL COG validator reported {errors:?}");
+}
+
+#[test]
+fn generated_cogs_pass_the_gdal_cog_validator() {
+    if !reference::cog_validator_available() {
+        eprintln!("skipping GDAL COG validator test because osgeo_utils is unavailable");
+        return;
+    }
+
+    let planar = NamedTempFile::new().unwrap();
+    write_generated_planar_multiband_cog(planar.path());
+    assert_gdal_cog_validator_accepts(planar.path());
+
+    let subifd = NamedTempFile::new().unwrap();
+    write_generated_planar_multiband_subifd_cog(subifd.path());
+    assert_gdal_cog_validator_accepts(subifd.path());
+}
+
 #[test]
 fn matches_gdal_for_generated_sparse_cog() {
     if !reference::python_gdal_available() {

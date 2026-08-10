@@ -85,6 +85,23 @@ jobs:
       - name: Test GeoTIFF reader with async COG feature set
         run: cargo test -p geotiff-reader --no-default-features --features cog-async --locked
 
+  wasm:
+    name: wasm32 writer build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install 1.91.0 --profile minimal --target wasm32-unknown-unknown --no-self-update
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build the GeoTIFF writer for wasm32
+        run: cargo build -p geotiff-writer --target wasm32-unknown-unknown --all-features --locked
+
   corpus:
     name: Corpus sync
     runs-on: ubuntu-24.04

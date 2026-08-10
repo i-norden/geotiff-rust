@@ -33,6 +33,35 @@ KNOWN_INCOMPATIBLE_EDITION=NO\n",
     .into_bytes()
 }
 
+/// The ghost area is followed by a pad byte when it would otherwise leave the
+/// main IFD on an odd offset. GDAL's COG validator rejects the file otherwise.
+fn assert_main_ifd_follows_padded_ghost_area(
+    bytes: &[u8],
+    planar_configuration: PlanarConfiguration,
+) {
+    let is_bigtiff = u16::from_le_bytes([bytes[2], bytes[3]]) == 43;
+    let header_len = if is_bigtiff { 16 } else { 8 };
+    let ghost = gdal_structural_metadata_bytes(planar_configuration);
+    assert_eq!(
+        &bytes[header_len..header_len + ghost.len()],
+        ghost.as_slice()
+    );
+
+    let ghost_end = header_len + ghost.len();
+    let expected_ifd_offset = ghost_end + ghost_end % 2;
+    assert!(bytes[ghost_end..expected_ifd_offset]
+        .iter()
+        .all(|&byte| byte == 0));
+
+    let ifd_offset = if is_bigtiff {
+        u64::from_le_bytes(bytes[8..16].try_into().unwrap())
+    } else {
+        u64::from(u32::from_le_bytes(bytes[4..8].try_into().unwrap()))
+    };
+    assert_eq!(ifd_offset, expected_ifd_offset as u64);
+    assert_eq!(ifd_offset % 2, 0);
+}
+
 fn assert_strictly_increasing_offsets(offsets: &[u64], context: &str) {
     for window in offsets.windows(2) {
         assert!(
@@ -163,10 +192,7 @@ fn cog_layout_and_overview_discovery_roundtrip() {
         [0.0, 0.0, 0.0, 0.0, 64.0, 0.0],
         [4.0, 4.0, 0.0],
     );
-    assert_eq!(
-        &bytes[8..8 + gdal_structural_metadata_bytes(PlanarConfiguration::Chunky).len()],
-        gdal_structural_metadata_bytes(PlanarConfiguration::Chunky).as_slice()
-    );
+    assert_main_ifd_follows_padded_ghost_area(&bytes, PlanarConfiguration::Chunky);
 
     let geo = GeoTiffFile::from_bytes(bytes).unwrap();
     assert_eq!(geo.epsg(), Some(4326));
@@ -644,13 +670,61 @@ fn cog_emits_bigtiff_when_requested() {
 
     let bytes = buf.into_inner();
     assert_eq!(u16::from_le_bytes([bytes[2], bytes[3]]), 43);
-    assert_eq!(
-        &bytes[16..16 + gdal_structural_metadata_bytes(PlanarConfiguration::Chunky).len()],
-        gdal_structural_metadata_bytes(PlanarConfiguration::Chunky).as_slice()
-    );
+    assert_main_ifd_follows_padded_ghost_area(&bytes, PlanarConfiguration::Chunky);
 
     let tiff = TiffFile::from_bytes(bytes).unwrap();
     assert!(tiff.is_bigtiff());
+}
+
+#[test]
+fn cog_ghost_area_keeps_the_main_ifd_on_a_word_boundary() {
+    let data = Array2::<u8>::from_elem((32, 32), 3);
+    let mut oneshot_buf = Cursor::new(Vec::new());
+    CogBuilder::new(GeoTiffBuilder::new(32, 32).tile_size(16, 16).epsg(4326))
+        .overview_levels(vec![2])
+        .write_2d_to(&mut oneshot_buf, data.view())
+        .unwrap();
+    let oneshot = oneshot_buf.into_inner();
+    assert_main_ifd_follows_padded_ghost_area(&oneshot, PlanarConfiguration::Chunky);
+    assert_eq!(u32::from_le_bytes(oneshot[4..8].try_into().unwrap()), 192);
+    assert_eq!(
+        GeoTiffFile::from_bytes(oneshot).unwrap().overview_count(),
+        1
+    );
+
+    let mut streaming_buf = Cursor::new(Vec::new());
+    let mut writer = CogBuilder::new(GeoTiffBuilder::new(32, 32).tile_size(16, 16).epsg(4326))
+        .overview_levels(vec![2])
+        .tile_writer::<u8, _>(&mut streaming_buf)
+        .unwrap();
+    for tile_row in 0..2usize {
+        for tile_col in 0..2usize {
+            writer
+                .write_tile(
+                    tile_col * 16,
+                    tile_row * 16,
+                    &Array2::<u8>::from_elem((16, 16), 3).view(),
+                )
+                .unwrap();
+        }
+    }
+    writer.finish().unwrap();
+    assert_main_ifd_follows_padded_ghost_area(streaming_buf.get_ref(), PlanarConfiguration::Chunky);
+
+    // INTERLEAVE=BAND lengthens the ghost area, so the padding is recomputed.
+    let planar = Array3::<u8>::from_elem((32, 32, 3), 3);
+    let mut planar_buf = Cursor::new(Vec::new());
+    CogBuilder::new(
+        GeoTiffBuilder::new(32, 32)
+            .bands(3)
+            .photometric(PhotometricInterpretation::Rgb)
+            .planar_configuration(PlanarConfiguration::Planar)
+            .tile_size(16, 16),
+    )
+    .overview_levels(vec![2])
+    .write_3d_to(&mut planar_buf, planar.view())
+    .unwrap();
+    assert_main_ifd_follows_padded_ghost_area(planar_buf.get_ref(), PlanarConfiguration::Planar);
 }
 
 #[test]
