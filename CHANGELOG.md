@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.1 - 2026-08-11
+
+- support COG writing on `wasm32-unknown-unknown` by staging blocks and raw tiles in memory while retaining temporary-file spooling on native targets
+- pad the GDAL COG ghost area to a 2-byte boundary so the first IFD is word-aligned and accepted by GDAL's COG validator across classic TIFF, BigTIFF, chunky, planar, one-shot, and tile-wise output
+- make the GDAL COG validator parity test detect the separately packaged `osgeo_utils` module before running
+
 ## 0.8.0 - 2026-07-25
 
 Breaking changes:
