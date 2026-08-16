@@ -295,7 +295,7 @@ impl ColorMap {
     }
 
     pub fn from_tag_values(values: &[u16]) -> Result<Self, String> {
-        if values.len() % 3 != 0 {
+        if !values.len().is_multiple_of(3) {
             return Err(format!(
                 "ColorMap tag length must be divisible by 3, got {} values",
                 values.len()

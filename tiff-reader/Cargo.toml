@@ -20,7 +20,7 @@ ndarray = { workspace = true }
 thiserror = { workspace = true }
 memmap2 = { workspace = true }
 flate2 = { version = "1.0.35", default-features = false, features = ["zlib-rs"] }
-weezl = "0.1"
+weezl = "0.2"
 lru = "0.16.3"
 parking_lot = "0.12"
 

@@ -87,7 +87,9 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
                 "write_tile only supports single-band output; use write_tile_3d for multi-band tiles".into(),
             ));
         }
-        if x_off % self.tile_width as usize != 0 || y_off % self.tile_height as usize != 0 {
+        if !x_off.is_multiple_of(self.tile_width as usize)
+            || !y_off.is_multiple_of(self.tile_height as usize)
+        {
             return Err(Error::Other(format!(
                 "tile offsets must align to tile boundaries of {}x{}, got ({x_off},{y_off})",
                 self.tile_width, self.tile_height
@@ -151,7 +153,9 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
         y_off: usize,
         data: &ndarray::ArrayView3<T>,
     ) -> Result<()> {
-        if x_off % self.tile_width as usize != 0 || y_off % self.tile_height as usize != 0 {
+        if !x_off.is_multiple_of(self.tile_width as usize)
+            || !y_off.is_multiple_of(self.tile_height as usize)
+        {
             return Err(Error::Other(format!(
                 "tile offsets must align to tile boundaries of {}x{}, got ({x_off},{y_off})",
                 self.tile_width, self.tile_height

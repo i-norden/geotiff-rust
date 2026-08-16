@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- upgrade `weezl` to 0.2.1 and raise the minimum supported Rust version to 1.88
+
 ## 0.8.1 - 2026-08-11
 
 - support COG writing on `wasm32-unknown-unknown` by staging blocks and raw tiles in memory while retaining temporary-file spooling on native targets
