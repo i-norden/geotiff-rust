@@ -165,7 +165,7 @@ fn compress_block_jpeg<T: TiffWriteSample>(
     if pixels_per_row == 0 {
         return Ok(Vec::new());
     }
-    if samples.len() % pixels_per_row != 0 {
+    if !samples.len().is_multiple_of(pixels_per_row) {
         return Err(Error::CompressionFailed {
             index,
             reason: format!(
